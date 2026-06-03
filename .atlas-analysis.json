@@ -1,0 +1,95 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Deep Research Agent",
+  "projectDescription": "An autonomous AI agent that decomposes research questions, searches the web via DuckDuckGo, fetches and scores pages for credibility, and synthesizes cited markdown reports — accessible via CLI or a React web UI.",
+  "theme": "luma",
+  "primaryColor": "#6366f1",
+  "lightColor": "#e0e7ff",
+  "darkColor": "#1e1b4b",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/research-pipeline",
+              "concepts/credibility-scoring",
+              "concepts/report-format"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/cli-usage",
+              "guides/web-ui",
+              "guides/error-handling"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST API",
+            "pages": [
+              "api/overview",
+              "api/health",
+              "api/research",
+              "api/research-stream"
+            ]
+          },
+          {
+            "group": "Python Modules",
+            "pages": [
+              "api/agent",
+              "api/tools",
+              "api/context",
+              "api/report"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-step research pipeline: planning → first-round search → gap detection → second-round search → synthesis",
+    "Powered by Google Gemini (gemini-2.0-flash) with automatic model fallbacks and retry logic",
+    "DuckDuckGo web search via ddgs with up to 5 results per query",
+    "Source credibility scoring (0.0–1.0) based on domain authority, recency signals, and snippet relevance",
+    "Structured markdown reports with Executive Summary, Key Findings, Confidence Assessment, and numbered citations",
+    "Real-time Server-Sent Events (SSE) progress stream: search, fetch, thinking, gaps, plan, done",
+    "FastAPI backend with streaming and batch research endpoints",
+    "React + TypeScript web UI with live activity log and GFM markdown rendering",
+    "CLI entry point for scripting and terminal workflows",
+    "Page content capped at 3000 characters; max 10 agent loop iterations"
+  ],
+  "publicApiSurface": [
+    "AgentRunner.research(question, on_progress) -> str",
+    "AgentRunner.plan_research(question) -> dict",
+    "AgentRunner.find_gaps(question, findings_so_far) -> dict",
+    "AgentRunner.run_tool_use_loop(context, system_instruction, prompt, on_progress, max_iterations) -> str",
+    "ResearchAgent (compatibility alias for AgentRunner)",
+    "search_web(query, context, on_progress) -> list[dict]",
+    "fetch_page(url, context, on_progress) -> str",
+    "score_source(url, snippet, question) -> float",
+    "run_tool(name, tool_input, context, on_progress) -> str",
+    "ResearchContext(question)",
+    "ReportGenerator.generate_report(question, context, client, active_model) -> str",
+    "generate_content_with_retry(client, contents, config, on_progress, active_model) -> tuple[response, str]",
+    "GET /api/health",
+    "GET /api/status",
+    "POST /api/research  body: {question: string}",
+    "POST /api/research/stream  body: {question: string}  response: SSE"
+  ]
+}

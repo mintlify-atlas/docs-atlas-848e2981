@@ -1,0 +1,256 @@
+---
+title: "ReportGenerator and Synthesis Utilities Reference"
+sidebarTitle: "ReportGenerator"
+description: "ReportGenerator calls Gemini to produce a cited markdown report. Covers generate_content_with_retry, clean_text, truncate, and format_citations from utils.py."
+---
+
+Once the research pipeline has finished collecting and scoring sources, `ReportGenerator` takes over the final synthesis stage. It feeds all accumulated content from a `ResearchContext` into Gemini using a structured `SYNTHESIS_PROMPT`, producing a coherent, cited markdown report. The generator runs at `temperature=0.3` to keep synthesis deterministic and factually grounded. This page also covers the `generate_content_with_retry` utility that handles model fallback and retry logic for all Gemini calls, along with the text utility functions used throughout the pipeline.
+
+```python
+from report import ReportGenerator
+```
+
+---
+
+## `ReportGenerator`
+
+### `generate_report()`
+
+```python
+def generate_report(
+    question: str,
+    context: ResearchContext,
+    client: genai.Client,
+    active_model: str,
+) -> str
+```
+
+Synthesizes a structured markdown research report from the gathered context. The method constructs a prompt from `SYNTHESIS_PROMPT`, supplies the full fetched source content and source metadata from `context`, and calls Gemini at `temperature=0.3`. It is called automatically by `AgentRunner.research()` at the end of the pipeline, but can also be invoked directly when you want to regenerate or customize the report after modifying the context.
+
+<ParamField path="question" type="str" required>
+  The original research question. Included in the synthesis prompt so
+  Gemini focuses the report on answering it directly.
+</ParamField>
+
+<ParamField path="context" type="ResearchContext" required>
+  The fully-populated `ResearchContext` from the completed research session.
+  The method reads `context.sources_fetched`, `context.source_metadata`,
+  `context.established_facts`, and `context.gaps` to assemble the synthesis
+  input.
+</ParamField>
+
+<ParamField path="client" type="genai.Client" required>
+  An initialized `google.generativeai` client. Typically `AgentRunner.client`,
+  which is configured with the API key provided at construction time.
+</ParamField>
+
+<ParamField path="active_model" type="str" required>
+  The Gemini model name to use for synthesis, e.g. `"gemini-2.0-flash"`.
+  This value is maintained by `AgentRunner` and may have been updated by
+  model fallback during the search phases.
+</ParamField>
+
+**Returns:** `str` — A complete markdown report. The report typically includes an executive summary, thematic sections with inline citations, a discussion of knowledge gaps, and a numbered sources list.
+
+**Raises:** `RuntimeError` if Gemini returns no candidates or if the response content is empty.
+
+<Note>
+  Synthesis runs at `temperature=0.3` to reduce hallucination risk and produce
+  stable, reproducible reports. If you call `generate_report` multiple times
+  on the same context, you can expect very similar (though not byte-identical)
+  output each time.
+</Note>
+
+#### Usage Example
+
+```python
+from agent import AgentRunner
+from report import ReportGenerator
+
+# Run the research pipeline up to (but not including) final synthesis
+runner = AgentRunner()
+ctx = runner._build_context("What are the climate impacts of permafrost thaw?")
+# ... (populate context via search phases) ...
+
+# Synthesize the report manually
+generator = ReportGenerator()
+report = generator.generate_report(
+    question="What are the climate impacts of permafrost thaw?",
+    context=ctx,
+    client=runner.client,
+    active_model=runner.model,
+)
+
+print(report)
+```
+
+Alternatively, the full pipeline (including synthesis) runs automatically through `AgentRunner.research()`:
+
+```python
+from agent import AgentRunner
+
+runner = AgentRunner()
+report = runner.research("What are the climate impacts of permafrost thaw?")
+print(report)
+```
+
+---
+
+## `generate_content_with_retry`
+
+```python
+from gemini_client import generate_content_with_retry
+
+def generate_content_with_retry(
+    client: genai.Client,
+    *,
+    contents: Any,
+    config: Any,
+    on_progress: Callable[[str, str], None] | None = None,
+    active_model: str | None = None,
+) -> tuple[Any, str]
+```
+
+The low-level Gemini call wrapper used by both `AgentRunner` and `ReportGenerator`. It handles per-model retries with exponential backoff and automatic fallback through the model hierarchy when a model is unavailable or rate-limited. Understanding this function is useful when diagnosing latency issues or building custom Gemini integrations with the same resilience guarantees.
+
+### Model Selection
+
+```python
+DEFAULT_MODEL = "gemini-2.0-flash"
+FALLBACK_MODELS = (
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-1.5-flash",
+)
+```
+
+The model sequence is determined by `model_candidates()`, which checks the `GEMINI_MODEL` environment variable first. If set, that model is tried first, followed by the standard fallback list.
+
+### Retry Behavior
+
+| Setting | Value |
+|---|---|
+| Max retries per model | 3 |
+| Retryable HTTP status codes | 429, 500, 502, 503, 504 |
+| Base delay | 2.0 seconds |
+| Delay formula | `BASE_DELAY_SEC × (2 ** attempt)` → 2 s, 4 s, 8 s |
+
+After exhausting all retries for a model, the function advances to the next model in the sequence. If all models and retries are exhausted, the last exception is re-raised.
+
+<ParamField path="client" type="genai.Client" required>
+  An initialized `google.generativeai` client.
+</ParamField>
+
+<ParamField path="contents" type="Any" required>
+  The `contents` argument forwarded to `client.models.generate_content()`.
+  Accepts any value the Gemini Python SDK accepts (string, list of parts, etc.).
+</ParamField>
+
+<ParamField path="config" type="Any" required>
+  The generation config forwarded to `client.models.generate_content()`,
+  typically a `genai.GenerateContentConfig` instance.
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Optional progress callback. May fire informational events during model
+  switching.
+</ParamField>
+
+<ParamField path="active_model" type="str" optional>
+  If provided, this model is tried first before the standard candidate list,
+  allowing callers to resume from a model that worked in a previous call.
+</ParamField>
+
+**Returns:** `tuple[Any, str]` — A `(response, model_name_used)` tuple, where `response` is the raw Gemini API response object and `model_name_used` is the model string that successfully responded.
+
+**Raises:** The last caught exception if all models and retries are exhausted.
+
+---
+
+## Text Utilities
+
+The `utils` module provides helper functions for text normalization used throughout the pipeline. Import them individually as needed.
+
+```python
+from utils import clean_text, truncate, format_citations
+```
+
+### `clean_text()`
+
+```python
+def clean_text(text: str) -> str
+```
+
+Normalizes whitespace and strips non-printable control characters from a string. Removes characters in the ranges `\x00`–`\x08` and `\x0b` and similar, while preserving standard whitespace like spaces, tabs, and newlines.
+
+<ParamField path="text" type="str" required>
+  The raw text to clean.
+</ParamField>
+
+**Returns:** `str` — The cleaned string with normalized whitespace and no control characters.
+
+---
+
+### `truncate()`
+
+```python
+def truncate(text: str, max_chars: int = 3000) -> str
+```
+
+Truncates `text` to at most `max_chars` characters, cutting at a word boundary to avoid splitting mid-word. The cut point is the last space found after the 80% mark of `max_chars`. Appends `"…"` to indicate truncation.
+
+<ParamField path="text" type="str" required>
+  The text to truncate.
+</ParamField>
+
+<ParamField path="max_chars" type="int" optional>
+  Maximum character count. Defaults to `3000` (matching `MAX_PAGE_CHARS`
+  in `tools.py`). Pass a smaller value for tighter summaries.
+</ParamField>
+
+**Returns:** `str` — The (possibly truncated) string. If `len(text) <= max_chars`, the original string is returned unchanged.
+
+```python
+from utils import truncate
+
+long_text = "word " * 1000   # 5000 chars
+short = truncate(long_text, max_chars=100)
+print(len(short))   # ≤ 101 (100 chars + "…")
+```
+
+---
+
+### `format_citations()`
+
+```python
+def format_citations(sources: list[dict[str, str]]) -> str
+```
+
+Formats a list of source dicts as a numbered markdown citation list, suitable for appending to the end of a research report.
+
+<ParamField path="sources" type="list[dict[str, str]]" required>
+  A list of source dicts, each with at minimum a `title` (str) and `url`
+  (str) key. Compatible with the output of `ResearchContext.get_all_sources()`.
+</ParamField>
+
+**Returns:** `str` — A numbered markdown list where each line is `N. [Title](url)`. Returns the string `"_No sources collected._"` if the input list is empty.
+
+```python
+from utils import format_citations
+from context import ResearchContext
+
+ctx = ResearchContext(question="...")
+# ... (populate ctx via research) ...
+
+citations = format_citations(ctx.get_all_sources())
+print(citations)
+# 1. [NOAA Ocean Research Report](https://noaa.gov/report)
+# 2. [MIT Climate Review](https://mit.edu/climate)
+```
+
+<Warning>
+  `format_citations` expects each dict to have both `title` and `url` keys.
+  Passing dicts with missing keys will raise a `KeyError`. If you are
+  constructing the list manually, ensure both fields are present.
+</Warning>

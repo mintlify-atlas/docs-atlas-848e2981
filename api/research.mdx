@@ -1,0 +1,88 @@
+---
+title: "POST /api/research — Run a Full Research Query"
+sidebarTitle: "POST /research"
+description: "POST /api/research runs the full research pipeline synchronously and returns a cited markdown report. Expect 30–120 seconds per query depending on complexity."
+---
+
+`POST /api/research` runs the Deep Research Agent's full pipeline — planning, multi-round web search, source evaluation, gap detection, and report synthesis — in a single blocking HTTP request. When the request returns, the response body contains the complete research report as a markdown string alongside an echo of the original question. This endpoint is ideal for server-to-server integrations, scripting, and batch workflows where streaming progress is not required.
+
+<Note>
+  This endpoint runs synchronously and holds the connection open until the report is complete. Depending on the complexity of the question and the number of search iterations required, responses typically take **30 to 120 seconds**. Make sure your HTTP client is configured with a sufficiently long timeout before calling this endpoint.
+</Note>
+
+## Request
+
+**`POST /api/research`**
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/json` |
+
+### Body fields
+
+<ParamField body="question" type="string" required>
+  The natural-language research question to investigate. Must be between **3** and **2000** characters. Whitespace-only strings are rejected with a `400` error.
+</ParamField>
+
+## Response
+
+### 200 OK
+
+Returns a JSON object with the generated report and the original question.
+
+<ResponseField name="report" type="string" required>
+  The full research report in Markdown format. Includes inline citations and a references section where sources are available.
+</ResponseField>
+
+<ResponseField name="question" type="string" required>
+  The original question string echoed back from the request body.
+</ResponseField>
+
+### Error responses
+
+| Status | Condition | Body |
+|--------|-----------|------|
+| `400` | `question` is empty or whitespace only after stripping | `{"detail": "Question cannot be empty"}` |
+| `422` | Request body is malformed, or `question` is shorter than 3 chars / longer than 2000 chars | FastAPI validation error object |
+| `500` | Missing API key or unrecoverable error during research | `{"detail": "<error message>"}` |
+
+## Examples
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST http://127.0.0.1:8000/api/research \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the latest advances in nuclear fusion energy?"}' \
+  --max-time 180
+```
+
+```python Python (requests)
+import requests
+
+response = requests.post(
+    "http://127.0.0.1:8000/api/research",
+    json={"question": "What are the latest advances in nuclear fusion energy?"},
+    timeout=180,
+)
+response.raise_for_status()
+
+data = response.json()
+print(data["question"])   # "What are the latest advances in nuclear fusion energy?"
+print(data["report"])     # Full markdown report string
+```
+
+</CodeGroup>
+
+### Example response body
+
+```json
+{
+  "question": "What are the latest advances in nuclear fusion energy?",
+  "report": "# Nuclear Fusion Energy: Recent Advances\n\n## Overview\n\nNuclear fusion research has accelerated significantly in the 2020s...\n\n## Key Developments\n\n### Inertial Confinement Fusion\n\nIn December 2022, the National Ignition Facility (NIF) at Lawrence Livermore...\n\n## References\n\n1. [NIF achieves fusion ignition](https://www.llnl.gov/...) — Lawrence Livermore National Laboratory\n"
+}
+```
+
+<Warning>
+  A `500` response almost always means the server cannot reach the LLM provider. Verify your API key is set in `.env` by calling `GET /api/status` first. If `ready` is `false`, no research request will succeed until the key is configured.
+</Warning>

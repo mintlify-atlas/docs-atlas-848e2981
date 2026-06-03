@@ -1,0 +1,197 @@
+---
+title: "How the Five-Stage Research Pipeline Works"
+sidebarTitle: "Research Pipeline"
+description: "Deep Research Agent runs five sequential stages — planning, first-round search, gap detection, second-round search, and synthesis — to produce cited reports."
+---
+
+The Deep Research Agent processes every question through a deterministic five-stage pipeline. Rather than issuing a single search and summarising results, the agent plans its approach, executes two distinct rounds of tool-assisted research separated by an explicit gap-detection pass, and then synthesises everything into a structured, citation-rich report. This design ensures both breadth (first round) and depth (second round targeting gaps) before any prose is written.
+
+## Session State: ResearchContext
+
+All five stages share a single `ResearchContext` object that acts as the session memory for the entire research run. No stage writes to a global variable; every read and write goes through this object, which keeps the pipeline stateless from the outside while being fully stateful internally.
+
+```python
+class ResearchContext:
+    question: str                          # The original user question
+    queries_made: list[str]                # Every search query issued so far
+    source_metadata: dict[str, dict]       # url -> {title, snippet, score, fetched}
+    sources_fetched: dict[str, str]        # url -> cleaned page content
+    established_facts: list[str]
+    plan: dict | None                      # Populated after Stage 1
+    gaps: list[str]                        # Populated after Stage 3
+    follow_up_queries: list[str]           # Populated after Stage 3
+```
+
+`source_metadata` stores every URL the agent has *seen*, along with the credibility score computed at discovery time. `sources_fetched` stores every URL the agent has actually *read* in full. This distinction matters: a URL can appear in search results (and be scored) without ever being fetched, either because its score was too low or because the iteration limit was reached first.
+
+**Cache hit prevention.** Before fetching any URL, `fetch_page` checks `context.is_fetched(url)`. If the content is already present it is returned immediately from the cache, so the agent never downloads the same page twice within a single research run regardless of which stage requests it.
+
+---
+
+## The Five Stages
+
+<Steps>
+  <Step title="Planning">
+    Gemini receives the raw user question and the planning system prompt and returns a structured JSON research plan. The plan is stored in `context.plan` and drives the entire first round.
+
+    **Input:** raw `question: str`
+
+    **Output stored in `context.plan`:**
+
+    | Field | Type | Description |
+    |---|---|---|
+    | `question_type` | `"factual"` \| `"comparative"` \| `"exploratory"` \| `"technical"` | Classifies the nature of the question |
+    | `search_strategy` | `str` | e.g. `"breadth-first"` or `"deep-dive on one angle"` |
+    | `prioritized_sub_queries` | `list[dict]` | Each entry has `query`, `priority` (`High`/`Medium`/`Low`), and `reasoning` |
+
+    ```python
+    plan = agent.plan_research(question)
+    # Example output:
+    # {
+    #   "question_type": "comparative",
+    #   "search_strategy": "breadth-first",
+    #   "prioritized_sub_queries": [
+    #     {"query": "Python vs Go performance benchmarks 2024",
+    #      "priority": "High",
+    #      "reasoning": "Core comparison needed first"},
+    #     {"query": "Go concurrency model explained",
+    #      "priority": "Medium",
+    #      "reasoning": "Supports understanding trade-offs"}
+    #   ]
+    # }
+    ```
+
+    If the JSON response from Gemini cannot be parsed, the planner falls back to a minimal single-query plan so the pipeline always has something to work with.
+
+    <Note>
+      The `question_type` field influences the system prompt used in later stages. A `"technical"` question directs the agent to prioritise documentation and academic sources; a `"comparative"` question prompts it to seek evidence for both sides.
+    </Note>
+  </Step>
+
+  <Step title="First-Round Research">
+    The agent executes the tool-use loop using the sub-queries from the plan. In each iteration Gemini may call `search_web` to issue new queries or `fetch_page` to read a URL in full. The loop runs for at most `MAX_ITERATIONS / 2` iterations (5 by default, since `MAX_ITERATIONS = 10`).
+
+    **Input:** `context.plan.prioritized_sub_queries`
+
+    **What the loop does each iteration:**
+
+    | Tool called | Effect on ResearchContext |
+    |---|---|
+    | `search_web(query)` | Appends to `queries_made`; populates `source_metadata` with scores for each result URL |
+    | `fetch_page(url)` | Checks score ≥ `MIN_CREDIBILITY_SCORE` (0.5); checks cache; writes cleaned content to `sources_fetched` |
+
+    ```python
+    agent.run_tool_use_loop(
+        context=context,
+        system_instruction=FIRST_ROUND_SYSTEM_PROMPT,
+        prompt=first_round_prompt,
+        on_progress=on_progress,
+        max_iterations=MAX_ITERATIONS // 2,  # 5
+    )
+    ```
+
+    Sources whose credibility score is at or below 0.5 are blocked at the `fetch_page` level — the agent sees an error string rather than page content and a `"block"` progress event fires. This means low-quality sources do not consume iteration budget.
+
+    <Tip>
+      High-priority sub-queries from the plan are placed earlier in the prompt, so the first few iterations naturally focus on the most important searches before the iteration cap is reached.
+    </Tip>
+  </Step>
+
+  <Step title="Gap Detection">
+    After the first round, all findings accumulated in `context.sources_fetched` are serialised into a `findings_so_far` string and sent to Gemini with a gap-detection prompt. Gemini compares what was found against the original question and identifies unanswered areas.
+
+    **Input:** `question`, `findings_so_far` (serialised from `context.sources_fetched`)
+
+    **Output stored in context:**
+
+    | Field | Type | Description |
+    |---|---|---|
+    | `context.gaps` | `list[str]` | Human-readable descriptions of unanswered areas |
+    | `context.follow_up_queries` | `list[str]` | New search query strings to address each gap |
+
+    ```python
+    gaps_result = agent.find_gaps(question, findings_so_far)
+    # Example output:
+    # {
+    #   "gaps": [
+    #     "No information found on memory usage trade-offs",
+    #     "Missing real-world deployment case studies"
+    #   ],
+    #   "follow_up_queries": [
+    #     "Go vs Python memory consumption production workloads",
+    #     "companies migrating from Python to Go case study"
+    #   ]
+    # }
+    ```
+
+    If no gaps are found (empty lists), Stage 4 is skipped entirely and the pipeline moves directly to synthesis.
+  </Step>
+
+  <Step title="Second-Round Research">
+    If gaps were detected, a second tool-use loop runs with the `follow_up_queries` as its starting prompt context. This round also runs for up to `MAX_ITERATIONS / 2` iterations and has access to the same `ResearchContext`, so it can see everything already fetched and will not re-fetch cached URLs.
+
+    **Input:** `context.follow_up_queries`
+
+    **Behaviour differences from Stage 2:**
+
+    - The system prompt is scoped to gap-filling rather than broad exploration.
+    - The agent already has a populated `queries_made` list, so it avoids repeating searches it issued in round one.
+    - Cache hits from round one are returned immediately, preserving the iteration budget for genuinely new pages.
+
+    ```python
+    if context.follow_up_queries:
+        agent.run_tool_use_loop(
+            context=context,
+            system_instruction=SECOND_ROUND_SYSTEM_PROMPT,
+            prompt=second_round_prompt,
+            on_progress=on_progress,
+            max_iterations=MAX_ITERATIONS // 2,  # 5
+        )
+    ```
+
+    After this stage, `context.sources_fetched` contains the full body of evidence — from both rounds — ready for synthesis.
+  </Step>
+
+  <Step title="Synthesis">
+    The `ReportGenerator` serialises the entire `ResearchContext` — all fetched content, all source metadata with credibility scores, the original plan, and the identified gaps — and sends it to Gemini with the `SYNTHESIS_PROMPT`. Gemini produces the final structured Markdown report in one pass.
+
+    **Input:** complete `ResearchContext`
+
+    **Output:** structured Markdown report (see [Report Format](/concepts/report-format))
+
+    The synthesis prompt instructs Gemini to:
+    - Group findings by theme (not by sub-query)
+    - Use numbered inline citations `[1]`, `[2]` that map to the Sources list
+    - Report how many sources were fetched versus blocked
+    - Provide an honest confidence assessment referencing actual source quality
+
+    <Info>
+      The agent never streams partial synthesis output. Gemini receives the complete context in one request and returns the complete report, ensuring citations are consistent throughout the document.
+    </Info>
+  </Step>
+</Steps>
+
+---
+
+## Pipeline Summary Table
+
+| Stage | Gemini call? | Tools available | Reads context | Writes context |
+|---|---|---|---|---|
+| 1 — Planning | ✅ | None | `question` | `plan` |
+| 2 — First Round | ✅ (loop) | `search_web`, `fetch_page` | `plan` | `queries_made`, `source_metadata`, `sources_fetched` |
+| 3 — Gap Detection | ✅ | None | `sources_fetched` | `gaps`, `follow_up_queries` |
+| 4 — Second Round | ✅ (loop, conditional) | `search_web`, `fetch_page` | `follow_up_queries`, cache | `queries_made`, `source_metadata`, `sources_fetched` |
+| 5 — Synthesis | ✅ | None | Full context | None (returns report) |
+
+## Configuration Limits
+
+The pipeline respects a small set of hard limits defined at the top of the agent module:
+
+```python
+MAX_ITERATIONS = 10          # Total tool-use iterations across both rounds
+MAX_SOURCES_PER_QUERY = 5    # Maximum search results kept per query
+MAX_CHARS_PER_PAGE = 3000    # Fetched page content is truncated to this length
+MIN_CREDIBILITY_SCORE = 0.5  # Sources at or below this score are blocked
+```
+
+These constants ensure the pipeline completes in bounded time and token budget regardless of how broad the question is.

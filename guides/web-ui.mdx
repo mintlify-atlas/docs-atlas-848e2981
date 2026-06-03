@@ -1,0 +1,90 @@
+---
+title: "Using the Deep Research Agent Web Interface"
+sidebarTitle: "Web UI"
+description: "Start the FastAPI backend and React frontend to research questions interactively with live progress updates, activity logs, and rendered markdown reports."
+---
+
+The Deep Research Agent ships with a full-stack web interface: a FastAPI backend that streams Server-Sent Events (SSE) and a React frontend built with Vite. Together they give you a live, browser-based research experience — submit a question, watch the agent plan and search in real time, then read the rendered markdown report without leaving your browser.
+
+## Starting the Application
+
+You need two terminal windows running concurrently — one for the API server and one for the frontend dev server.
+
+<Steps>
+  <Step title="Start the FastAPI backend">
+    Open a terminal, navigate into the `research_agent` directory, and start Uvicorn:
+
+    ```bash
+    cd research_agent
+    uvicorn server:app --reload --host 127.0.0.1 --port 8000
+    ```
+
+    Uvicorn will reload automatically when server-side files change. The API listens on `http://127.0.0.1:8000`.
+  </Step>
+
+  <Step title="Start the React frontend">
+    Open a second terminal, navigate into the `frontend` directory, and start Vite:
+
+    ```bash
+    cd frontend
+    npm run dev
+    ```
+
+    Vite serves the UI at `http://localhost:5173` and proxies all `/api/*` requests to the backend automatically.
+  </Step>
+
+  <Step title="Open the UI in your browser">
+    Navigate to **http://localhost:5173**. If the API health indicator in the top-right corner shows green, the frontend has successfully reached the backend and you are ready to run research.
+  </Step>
+</Steps>
+
+<Note>
+In development mode, Vite proxies every request to `/api/*` directly to `http://127.0.0.1:8000`. This means the frontend and backend can run on different ports without CORS issues during development — you never need to change the API base URL in your code.
+</Note>
+
+## Submitting a Research Question
+
+The main input area is a textarea in the center of the page. Type your question, then start the research in one of three ways:
+
+- **Type freely** — enter any research question in the textarea.
+- **Use an example chip** — click one of the three pre-set example questions to populate the textarea instantly:
+  - *"What are the latest breakthroughs in fusion energy?"*
+  - *"How is CRISPR being used to treat genetic diseases in 2025?"*
+  - *"What are the main approaches to scalable quantum error correction?"*
+- **Click Start** — press the **Start** button below the textarea to begin.
+
+<Tip>
+Press **Ctrl+Enter** (or **Cmd+Enter** on macOS) while the textarea is focused to submit your question immediately — no need to reach for the mouse.
+</Tip>
+
+## Reading the Activity Log
+
+Once a research run begins, a live activity log appears below the input area. Each line represents a progress event streamed from the backend via SSE, tagged with an event type so you can follow exactly what the agent is doing.
+
+| Event type | What it means | Display format |
+|---|---|---|
+| `start` | Research has begun | `Research started` |
+| `plan` | Agent has created a research plan | `Plan: <detail>` |
+| `search` | Agent is issuing a web search | `Searching: <detail>` |
+| `fetch` | Agent is reading a webpage | `Reading: <detail>` |
+| `thinking` | Agent is reasoning or evaluating results | `<detail>` (shown directly) |
+| `gaps` | Agent identified gaps and is planning follow-up | `Gaps: <detail>` |
+| `block` | A URL was rejected by the credibility filter | `Blocked: <detail>` |
+
+Events appear in real time as the agent works through its research iterations, giving you a transparent view of every search query issued, every page read, and every credibility decision made.
+
+## Cancelling a Research Run
+
+If you want to stop an in-progress research run — for example because you phrased the question incorrectly — click the **Cancel** button that replaces the Start button during an active run. The frontend immediately aborts the in-flight SSE connection via an `AbortController`, clears the loading state, and leaves whatever activity log entries were already received in place.
+
+You can then edit your question and start a new run straight away.
+
+## Reading the Rendered Report
+
+When the agent finishes, the final report appears below the activity log as rendered markdown — headings, bullet points, bold text, tables, and inline links are all formatted by `react-markdown` with `remark-gfm`. You do not need to switch to a separate view or download a file; the report renders directly on the page.
+
+Inline citations and hyperlinks in the report are clickable and open in a new tab, letting you verify sources without leaving the interface.
+
+## API Health Indicator
+
+A small status indicator in the UI checks the backend's `/api/health` endpoint every **15 seconds**. When the backend is reachable the indicator shows green; if the backend goes offline or returns an error it turns red. If you see a red indicator, confirm that Uvicorn is still running in Terminal 1 before submitting a question.

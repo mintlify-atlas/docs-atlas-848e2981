@@ -1,0 +1,105 @@
+---
+title: "Health and Status Endpoints for Research Agent API"
+sidebarTitle: "Health & Status"
+description: "GET /api/health returns a liveness signal. GET /api/status reports whether the Gemini API key is configured and which model is active."
+---
+
+Two lightweight `GET` endpoints give you visibility into the server's operational state without triggering any LLM calls. `/api/health` is a simple liveness probe suited for automated monitors and container orchestrators. `/api/status` goes one step further and checks whether the LLM provider credentials have been loaded correctly, making it the right call to make from a UI before enabling research features.
+
+---
+
+## GET /api/health
+
+Returns a static `{"status": "ok"}` payload as long as the server process is running and able to accept connections. It performs no I/O beyond answering the HTTP request, so it should always respond in single-digit milliseconds.
+
+**Request**
+
+No request body, query parameters, or headers are required.
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+**Response — 200 OK**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Use this endpoint for:
+
+- **Container liveness probes** (Kubernetes, Docker Compose `healthcheck`)
+- **Uptime monitors** that need a zero-cost ping
+- **CI smoke tests** to confirm the server started before running integration tests
+
+<Note>
+  A `200` response from `/api/health` only means the HTTP server is reachable. It does **not** mean the LLM provider is configured. Use `/api/status` to verify that.
+</Note>
+
+---
+
+## GET /api/status
+
+Attempts to resolve the configured LLM provider and model by reading the server's environment. Returns a structured object that tells you whether the server is ready to accept research requests and, if so, which provider and model are active.
+
+**Request**
+
+No request body, query parameters, or headers are required.
+
+```bash
+curl http://127.0.0.1:8000/api/status
+```
+
+**Response — 200 OK**
+
+The endpoint always returns HTTP `200`. Readiness is communicated through the `ready` field in the body, not through the status code.
+
+<ResponseField name="ready" type="boolean" required>
+  `true` when the LLM provider API key has been found and a model resolved successfully. `false` when configuration is missing or invalid.
+</ResponseField>
+
+<ResponseField name="provider" type="string | null" required>
+  The name of the active LLM provider (e.g. `"gemini"`) when `ready` is `true`. `null` when `ready` is `false`.
+</ResponseField>
+
+<ResponseField name="model" type="string | null" required>
+  The identifier of the active model (e.g. `"gemini-2.0-flash"`) when `ready` is `true`. `null` when `ready` is `false`.
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  A human-readable summary. When `ready` is `true` this reads something like `"Using gemini (gemini-2.0-flash)"`. When `ready` is `false` this contains the error description, such as `"GEMINI_API_KEY is not set"`.
+</ResponseField>
+
+**Example — server is ready**
+
+```json
+{
+  "ready": true,
+  "provider": "gemini",
+  "model": "gemini-2.0-flash",
+  "message": "Using gemini (gemini-2.0-flash)"
+}
+```
+
+**Example — API key missing**
+
+```json
+{
+  "ready": false,
+  "provider": null,
+  "model": null,
+  "message": "GEMINI_API_KEY is not set"
+}
+```
+
+Use this endpoint for:
+
+- **UI gating** — disable the research input and show a configuration warning until `ready` is `true`
+- **Startup diagnostics** — print the status object in your integration test suite to surface missing keys early
+- **Debugging** — confirm which model the server has selected when multiple environment variables are present
+
+<Warning>
+  If `ready` is `false`, all calls to `POST /api/research` and `POST /api/research/stream` will fail with a `500` error. Resolve the missing configuration (typically by adding the correct key to your `.env` file and restarting the server) before sending research requests.
+</Warning>

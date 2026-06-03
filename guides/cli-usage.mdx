@@ -1,0 +1,153 @@
+---
+title: "Run Deep Research Agent from the Command Line"
+sidebarTitle: "CLI Usage"
+description: "Use Deep Research Agent's CLI to run web research queries, save reports to files, and stream verbose progress — with flags for scripting and automation."
+---
+
+The Deep Research Agent CLI lets you run a full research pipeline — planning, searching, fetching, and synthesizing — directly from your terminal. Pass a question as a positional argument or via a flag, optionally stream verbose step-by-step output, and either print the final report to stdout or write it straight to a file.
+
+## Synopsis
+
+```bash
+python main.py [OPTIONS] [QUESTION]
+```
+
+## Flags and Arguments
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `question` | positional string | — | The research question to investigate |
+| `-q`, `--query` | string | — | Alternative way to pass the research question |
+| `--verbose` | boolean flag | `false` | Print every step event (plan, searches, gap analysis) |
+| `-o`, `--output` | file path | — | Save the markdown report to a file instead of stdout |
+
+## Invocation Styles
+
+Both the positional argument and the `-q` / `--query` flag accept the same research question. Use whichever fits your workflow — they are functionally identical.
+
+<CodeGroup>
+```bash Positional argument
+python main.py "What are the latest breakthroughs in fusion energy?"
+```
+
+```bash --query flag
+python main.py --query "What are the latest breakthroughs in fusion energy?"
+```
+
+```bash Short -q flag
+python main.py -q "What are the latest breakthroughs in fusion energy?"
+```
+</CodeGroup>
+
+## Default Behavior
+
+Without any extra flags the agent writes **progress messages to stderr** and prints the **final report to stdout**, preceded by a separator line so you can reliably split them in scripts.
+
+```
+============================================================
+# Fusion Energy Breakthroughs
+
+...report content...
+```
+
+Progress lines written to stderr follow this format during a normal (non-verbose) run:
+
+```
+🔍 Searching: fusion energy 2025 breakthroughs
+📄 Fetching: https://example.com/fusion-article
+🚫 Blocked: https://low-credibility-site.com (score: 0.23)
+```
+
+Each icon indicates the operation type at a glance — `🔍` for a search query being issued, `📄` for a page being fetched, and `🚫` for a URL that was rejected by the credibility filter.
+
+## Verbose Mode
+
+Add `--verbose` to see every internal step: the research plan, each individual search and fetch, and gap-analysis passes between iterations.
+
+```bash
+python main.py --verbose "How is CRISPR being used to treat genetic diseases in 2025?"
+```
+
+In verbose mode progress lines follow the format `[EVENT_TYPE] detail`, for example:
+
+```
+[plan] 1. Survey peer-reviewed sources on CRISPR therapeutics approved in 2025...
+[search] CRISPR gene therapy clinical trials 2025
+[fetch] https://www.nature.com/articles/...
+[thinking] Evaluating source credibility and coverage gaps...
+[gaps] Missing data on off-target effects in recent trials
+```
+
+<Tip>
+Verbose mode is the fastest way to understand exactly what the agent is doing at each step — use it when a report looks incomplete or when you want to audit which sources were consulted.
+</Tip>
+
+## Saving to a File
+
+Use `-o` or `--output` with a file path to write the markdown report directly to disk instead of printing to stdout. Progress messages still go to stderr.
+
+```bash
+python main.py "What are the main approaches to scalable quantum error correction?" \
+  -o reports/quantum-error-correction.md
+```
+
+Combine `-o` with `--verbose` to capture a full log of progress events while writing the report to a file:
+
+```bash
+python main.py --verbose \
+  -q "What are the main approaches to scalable quantum error correction?" \
+  -o reports/quantum-error-correction.md
+```
+
+## Piping and Scripting
+
+Because progress goes to **stderr** and the report goes to **stdout**, you can redirect each stream independently in shell scripts.
+
+```bash
+# Save report to file, discard progress noise
+python main.py "Quantum error correction approaches" > report.md 2>/dev/null
+
+# Save report to file, keep progress in a separate log
+python main.py "Quantum error correction approaches" > report.md 2>progress.log
+
+# Pipe the report into another command (e.g. word count)
+python main.py "Quantum error correction approaches" 2>/dev/null | wc -w
+
+# Capture verbose output alongside the report
+python main.py --verbose "Quantum error correction approaches" \
+  > report.md 2>verbose.log
+```
+
+<Note>
+The separator line (`====...====`) is printed to **stdout** immediately before the report, so downstream tools that parse `stdout` will receive it. If you need clean markdown only, strip the first line of output in your script.
+</Note>
+
+## Error Conditions
+
+### Missing Question
+
+If you run `python main.py` without a question (neither positional nor `-q`), the CLI prints the full help text followed by a usage example, then exits with code **1**:
+
+```
+usage: main.py [-h] [-q QUERY_FLAG] [--verbose] [-o OUTPUT] [question]
+...
+Example:
+  python main.py "What are the latest breakthroughs in fusion energy?"
+```
+
+### Missing API Key
+
+If `GEMINI_API_KEY` is not set in `research_agent/.env`, the agent raises:
+
+```
+ValueError: GEMINI_API_KEY is not set. Add it to research_agent/.env
+```
+
+The process exits with code **1**. See the [Error Handling](/guides/error-handling) guide for details on how to configure your environment.
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Research completed successfully |
+| `1` | Error — missing question, missing API key, or research failure |

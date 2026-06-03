@@ -1,47 +1,163 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get started with Deep Research Agent"
+sidebarTitle: "Quickstart"
+description: "Install Deep Research Agent, set your Gemini API key, and run your first research query. Get a full cited markdown report from the CLI in about two minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide walks you through cloning the repository, installing dependencies for both the Python backend and the React frontend, and running your first research query. The CLI path gets you to a working report in about two minutes; the optional full-stack setup adds an interactive browser UI on top.
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure you have the following installed and ready:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+- **Python 3.11 or later** — the agent uses modern `asyncio` patterns and type hints that require 3.11+.
+- **Node.js 18 or later** — required only if you want to run the React frontend.
+- **A Gemini API key** — the agent calls the Google Gemini API for all reasoning steps.
 
-## Get started
+<Note>
+  Get a free Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey). Sign in with a Google account, click **Create API key**, and copy the generated key — you'll need it in Step 3.
+</Note>
+
+## Installation and Setup
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Download the project source to your local machine.
 
     ```bash
-    npm install your-package
+    git clone https://github.com/IconDean/research-agent.git
+    cd research-agent
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
+  <Step title="Create and activate a Python virtual environment">
+    Isolate the agent's dependencies from your system Python installation.
+
+    <CodeGroup>
+      ```bash macOS / Linux
+      cd research_agent
+      python -m venv venv
+      source venv/bin/activate
+      ```
+
+      ```bash Windows
+      cd research_agent
+      python -m venv venv
+      venv\Scripts\activate
+      ```
+    </CodeGroup>
+
+    Once the environment is active, your terminal prompt will be prefixed with `(venv)`.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Install Python dependencies">
+    Install all required packages from the pinned requirements file.
 
     ```bash
-    your-cli start
+    pip install -r requirements.txt
+    ```
+
+    This installs the Google Generative AI SDK, FastAPI, DuckDuckGo search, BeautifulSoup4, and supporting libraries.
+  </Step>
+
+  <Step title="Create the .env file">
+    The agent reads your Gemini API key from an environment file inside the `research_agent/` directory.
+
+    ```bash
+    # still inside research_agent/
+    cp .env.example .env
+    ```
+
+    Open `.env` in your editor and replace the placeholder with your actual key:
+
+    ```ini research_agent/.env
+    GEMINI_API_KEY=your_gemini_api_key_here
+    ```
+
+    <Warning>
+      Never commit your `.env` file to version control. It is already listed in `.gitignore`, but double-check before pushing to a shared repository.
+    </Warning>
+  </Step>
+
+  <Step title="Run your first research query">
+    With the virtual environment active and your `.env` in place, run the CLI from inside `research_agent/`:
+
+    ```bash
+    python main.py "What are the latest breakthroughs in fusion energy?"
+    ```
+
+    Search and fetch progress is written to stderr as the agent works:
+
+    ```
+    🔍 Searching: fusion energy breakthroughs 2024
+    📄 Fetching: https://www.science.org/content/article/fusion-ignition
+    🔍 Searching: inertial confinement fusion recent results
+    📄 Fetching: https://www.energy.gov/articles/doe-national-laboratory-makes-history
+    🚫 Blocked: https://low-credibility-blog.example.com/fusion
+    🔍 Searching: private fusion companies milestones
+    📄 Fetching: https://www.nature.com/articles/d41586-024-fusion
+    ```
+
+    When synthesis completes, the full markdown report is printed to stdout:
+
+    ```markdown
+    ## Executive Summary
+
+    Fusion energy has seen significant milestones in 2024, with the National
+    Ignition Facility sustaining ignition in repeated experiments and several
+    private ventures announcing commercial reactor timelines...
+
+    ## Key Findings
+
+    ### Ignition and Energy Gain
+    ...
+
+    ### Private Sector Progress
+    ...
+
+    ## Sources
+
+    1. U.S. Department of Energy — https://www.energy.gov/...
+    2. Nature — https://www.nature.com/...
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Useful CLI Flags
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+Once the basic workflow is running, these flags give you more control:
+
+| Flag | Description |
+|------|-------------|
+| `--verbose` | Print each planning step, gap analysis, and intermediate reasoning to stderr |
+| `-o report.md` / `--output report.md` | Save the final report to a markdown file instead of printing to stdout |
+| `-q "question"` / `--query "question"` | Alternative to passing the question as a positional argument |
+
+```bash
+# Save report to a file with verbose progress
+python main.py --verbose -o fusion_report.md "What are the latest breakthroughs in fusion energy?"
+```
+
+## Optional: Run the Full Stack
+
+If you want the interactive React UI, start both servers after completing the steps above.
+
+**Terminal 1 — FastAPI backend** (from inside `research_agent/` with the venv active):
+
+```bash
+uvicorn server:app --reload --port 8000
+```
+
+**Terminal 2 — React frontend** (from the repo root):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) in your browser. Type your research question into the input field and click **Research** — live progress events will stream in as the agent works, and the finished report will render as formatted markdown when synthesis is complete.
+
+<Tip>
+  The React dev server proxies API requests to `localhost:8000` automatically. Make sure the FastAPI process is running before submitting a query from the UI.
 </Tip>

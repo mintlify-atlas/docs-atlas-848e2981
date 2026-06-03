@@ -1,0 +1,119 @@
+---
+title: "Configure Deep Research Agent: API Keys and Model Settings"
+sidebarTitle: "Configuration"
+description: "Set GEMINI_API_KEY, choose a Gemini model variant, and tune agent constraints like max iterations, page size, and credibility thresholds."
+---
+
+Deep Research Agent is configured through a combination of environment variables (loaded from a `.env` file) and compile-time constants defined in `config.py`. Environment variables control external service credentials and model selection; the `config.py` constants govern how the agent behaves at runtime—how many sources it reads, how many research iterations it performs, and what credibility bar a source must clear before its content is fetched.
+
+## Environment Variables
+
+### `.env` File Location
+
+The agent uses `python-dotenv` to load environment variables at startup. It looks for `.env` in two places, in order:
+
+1. `research_agent/.env` — the package directory (recommended; takes precedence)
+2. The repository root `.env` — useful if you share configuration across multiple tools in the same repo
+
+Create the file by copying the provided example:
+
+```bash
+cp research_agent/.env.example research_agent/.env
+```
+
+<Warning>
+  The `.env` file contains your API key and is listed in `.gitignore`. Never commit it to version control or include it in a Docker image. If you accidentally expose a key, rotate it immediately in [Google AI Studio](https://aistudio.google.com/app/apikey).
+</Warning>
+
+### Reference
+
+<ParamField path="GEMINI_API_KEY" type="string" required>
+  Your Google Gemini API key. This is the only required configuration value — the agent will refuse to start without it.
+
+  Obtain a key from [Google AI Studio](https://aistudio.google.com/app/apikey): sign in with a Google account, click **Create API key**, and paste the value here.
+
+  ```ini
+  GEMINI_API_KEY=AIzaSy...
+  ```
+</ParamField>
+
+<ParamField path="GEMINI_MODEL" type="string" default="gemini-2.0-flash">
+  The Gemini model variant used for question decomposition, tool invocation, gap analysis, and report synthesis. When omitted, the agent uses `gemini-2.0-flash`.
+
+  Valid values:
+
+  | Model | Notes |
+  |-------|-------|
+  | `gemini-2.0-flash` | Default. Fast and cost-effective for most research tasks. |
+  | `gemini-2.5-flash` | Higher capability; first automatic fallback on 503 errors. |
+  | `gemini-2.5-flash-lite` | Lightweight variant; second automatic fallback. |
+  | `gemini-1.5-flash` | Legacy option; used as the final fallback in the retry chain. |
+
+  ```ini
+  # Optional — uncomment and set to override the default
+  # GEMINI_MODEL=gemini-2.5-flash
+  ```
+</ParamField>
+
+A minimal `.env` file looks like this:
+
+```ini research_agent/.env
+GEMINI_API_KEY=your_gemini_api_key_here
+# GEMINI_MODEL=gemini-2.0-flash
+```
+
+## Agent Constraints
+
+The following values are defined as constants in `research_agent/config.py`. They are **not** environment variables and cannot be changed at runtime without editing the source file. They control how aggressively the agent searches and how much content it reads per source.
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `MAX_ITERATIONS` | `10` | Maximum number of tool-use loop iterations the agent may execute before being forced into synthesis. Prevents runaway research on open-ended questions. |
+| `MAX_SOURCES_PER_QUERY` | `5` | Maximum number of URLs fetched per DuckDuckGo search query. Higher values increase coverage but also increase latency and token usage. |
+| `MAX_CHARS_PER_PAGE` | `3000` | Character limit applied to each fetched page before it is passed to Gemini. Keeps context windows predictable and avoids oversized prompts from content-heavy pages. |
+| `MIN_CREDIBILITY_SCORE` | `0.5` | Minimum credibility score (0–1) a source domain must achieve before its content is fetched. Sources that fall below this threshold are logged as `🚫 Blocked: <url>` and skipped. |
+
+To adjust these values, open `research_agent/config.py` and edit the constants directly:
+
+```python research_agent/config.py
+MAX_ITERATIONS = 10          # increase for more thorough (slower) research
+MAX_SOURCES_PER_QUERY = 5    # increase to read more sources per search
+MAX_CHARS_PER_PAGE = 3000    # increase to pass more page content to Gemini
+MIN_CREDIBILITY_SCORE = 0.5  # raise to be more selective about sources
+```
+
+<Tip>
+  If your reports feel thin on a topic, try increasing `MAX_SOURCES_PER_QUERY` to `8` or `MAX_ITERATIONS` to `15` before lowering `MIN_CREDIBILITY_SCORE`. Accepting lower-credibility sources degrades report quality more than increasing the source or iteration caps.
+</Tip>
+
+## Model Fallback Behaviour
+
+The Gemini client (`gemini_client.py`) implements an automatic retry-and-fallback strategy to handle transient API errors without interrupting a research session.
+
+When an API call returns a retryable error code (`429`, `500`, `502`, `503`, or `504`), the client:
+
+1. Retries the **same model** up to **3 times**, with exponential back-off starting at 2 seconds.
+2. If all three retries fail, advances to the **next model** in the fallback chain and resets the retry counter.
+3. The fallback chain is fixed:
+
+```
+gemini-2.0-flash  →  gemini-2.5-flash  →  gemini-2.5-flash-lite  →  gemini-1.5-flash
+```
+
+If you have set `GEMINI_MODEL` to a model other than `gemini-2.0-flash`, the fallback chain still starts from `gemini-2.0-flash`—the env var controls only the initial model choice.
+
+<Note>
+  `429 Too Many Requests` errors are most common on free-tier API keys that have per-minute quota limits. If you consistently hit rate limits, consider upgrading your Google AI Studio plan or adding a delay between sequential research jobs.
+</Note>
+
+## CORS Configuration
+
+The FastAPI backend (`server.py`) restricts cross-origin requests to the following origins. This allows the React dev server and common local setups to connect without modification:
+
+| Origin | Use case |
+|--------|----------|
+| `http://localhost:5173` | Vite dev server default (React frontend) |
+| `http://127.0.0.1:5173` | Loopback alias for the Vite dev server |
+| `http://localhost:3000` | Alternative local dev port |
+
+If you serve the frontend from a different origin (for example, a custom port or a deployed URL), add it to the `allow_origins` list in `server.py` before starting the backend.

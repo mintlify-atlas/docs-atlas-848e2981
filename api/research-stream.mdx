@@ -1,0 +1,250 @@
+---
+title: "POST /api/research/stream — Stream Research Progress via SSE"
+sidebarTitle: "POST /research/stream"
+description: "POST /api/research/stream returns a Server-Sent Events stream with live search, fetch, and thinking events, followed by the final report and an end signal."
+---
+
+`POST /api/research/stream` runs the same full research pipeline as `POST /api/research` but delivers results progressively over a [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) (SSE) connection. Instead of waiting for a single blocking response, your client receives a real-time stream of typed event messages as the agent plans its strategy, performs web searches, fetches pages, detects gaps, and ultimately assembles the final report. This is the endpoint used by the built-in web UI and is the recommended choice for any user-facing integration.
+
+## Request
+
+**`POST /api/research/stream`**
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/json` |
+
+### Body fields
+
+<ParamField body="question" type="string" required>
+  The natural-language research question to investigate. Must be between **3** and **2000** characters. Whitespace-only strings are rejected with a `400` error before the stream opens.
+</ParamField>
+
+## Response
+
+**`Content-Type: text/event-stream`**
+
+The response body is a continuous stream of SSE messages. Each message follows the standard SSE wire format:
+
+```
+data: {"type": "<event_type>", "detail": "<detail_string>"}\n\n
+```
+
+Every event object has exactly two fields:
+
+- **`type`** — a fixed string identifying the event category (see the table below)
+- **`detail`** — a string whose content varies by event type
+
+The stream is terminated by an `end` event. The `report` or `error` event always arrives immediately before `end`.
+
+### Event types
+
+<Note>
+  The `end` event is always the final message in the stream, regardless of whether the research succeeded or failed. Always listen for `end` to know when it is safe to close the connection.
+</Note>
+
+| Type | When it fires | `detail` content |
+|------|---------------|-----------------|
+| `start` | Research pipeline begins | The research question as submitted |
+| `plan` | After the agent produces its research plan | `"Type: X, Strategy: Y, Queries: Q1, Q2, …"` |
+| `thinking` | At each internal agent iteration | `"Iteration N"` or a short description of the current reasoning step |
+| `search` | Each time the agent issues a web search | The query string sent to the search engine |
+| `fetch` | Each time the agent fetches a web page | The URL being retrieved |
+| `block` | A source is rejected during quality evaluation | `"<URL> (score: X.XX)"` |
+| `gaps` | After gap-detection analysis completes | `"Gaps found: N, Follow-up queries: Q1, Q2, …"` |
+| `report` | Research complete — final output | The full markdown report string |
+| `error` | Fatal error during research | Human-readable error message |
+| `end` | Always the last event | No meaningful detail (may be an empty string) |
+
+<Expandable title="Event flow example">
+A typical successful research run produces events in roughly this order:
+
+```
+start       → "What are the latest advances in nuclear fusion energy?"
+plan        → "Type: factual, Strategy: broad survey, Queries: nuclear fusion 2024, NIF ignition results, ..."
+thinking    → "Iteration 1"
+search      → "nuclear fusion breakthroughs 2024"
+fetch       → "https://www.science.org/content/article/..."
+fetch       → "https://www.llnl.gov/news/..."
+block       → "https://paywalled-journal.example.com/... (score: 0.21)"
+thinking    → "Iteration 2"
+search      → "Commonwealth Fusion SPARC tokamak progress"
+fetch       → "https://cfs.energy/technology/sparc"
+gaps        → "Gaps found: 2, Follow-up queries: fusion energy timeline, private fusion investment"
+search      → "fusion energy commercial timeline 2025"
+fetch       → "https://..."
+report      → "# Nuclear Fusion Energy: Recent Advances\n\n..."
+end         → ""
+```
+
+If a fatal error occurs, the `report` event is replaced by an `error` event, followed immediately by `end`.
+</Expandable>
+
+### Error responses (before stream opens)
+
+| Status | Condition |
+|--------|-----------|
+| `400` | `question` is empty or whitespace-only |
+| `422` | Malformed body or `question` fails length validation |
+
+If an error occurs **after** the stream has already opened (e.g. an API key problem discovered mid-run), it is delivered as an `error` event followed by an `end` event — the HTTP status remains `200` at that point.
+
+## Examples
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST http://127.0.0.1:8000/api/research/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the latest advances in nuclear fusion energy?"}' \
+  --no-buffer
+```
+
+```typescript TypeScript (fetch + SSE reader)
+async function streamResearch(question: string): Promise<string | null> {
+  const response = await fetch("http://127.0.0.1:8000/api/research/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let report: string | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const event = JSON.parse(line.slice(6)) as { type: string; detail: string };
+
+      switch (event.type) {
+        case "start":
+        case "plan":
+        case "thinking":
+        case "search":
+        case "fetch":
+        case "block":
+        case "gaps":
+          console.log(`[${event.type}]`, event.detail);
+          break;
+        case "report":
+          report = event.detail;
+          break;
+        case "error":
+          throw new Error(event.detail);
+        case "end":
+          return report;
+      }
+    }
+  }
+
+  return report;
+}
+```
+
+```javascript JavaScript (fetch + SSE reader)
+async function streamResearch(question) {
+  const controller = new AbortController();
+
+  const response = await fetch("http://127.0.0.1:8000/api/research/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+    signal: controller.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let report = null;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const event = JSON.parse(line.slice(6));
+
+        if (event.type === "report") report = event.detail;
+        if (event.type === "error") throw new Error(event.detail);
+        if (event.type === "end") return report;
+
+        console.log(`[${event.type}]`, event.detail);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return report;
+}
+
+// Cancel in-flight request
+// controller.abort();
+```
+
+</CodeGroup>
+
+### Example SSE output
+
+```
+data: {"type": "start", "detail": "What are the latest advances in nuclear fusion energy?"}
+
+data: {"type": "plan", "detail": "Type: factual, Strategy: broad survey, Queries: nuclear fusion 2024, NIF ignition, private fusion startups"}
+
+data: {"type": "thinking", "detail": "Iteration 1"}
+
+data: {"type": "search", "detail": "nuclear fusion breakthroughs 2024"}
+
+data: {"type": "fetch", "detail": "https://www.science.org/content/article/fusion-ignition"}
+
+data: {"type": "block", "detail": "https://paywalled-journal.example.com/fusion (score: 0.18)"}
+
+data: {"type": "gaps", "detail": "Gaps found: 2, Follow-up queries: SPARC reactor timeline, fusion investment 2025"}
+
+data: {"type": "report", "detail": "# Nuclear Fusion Energy: Recent Advances\n\n..."}
+
+data: {"type": "end", "detail": ""}
+```
+
+## Client-side cancellation
+
+To cancel an in-flight stream from the browser or Node.js, pass an `AbortController` signal to `fetch` and call `abort()` when needed:
+
+```typescript
+const controller = new AbortController();
+
+fetch("http://127.0.0.1:8000/api/research/stream", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ question }),
+  signal: controller.signal,
+});
+
+// Cancel at any time:
+controller.abort();
+```
+
+The server-side generator will be interrupted when the client disconnects. The built-in TypeScript client (`api.ts`) exposes this pattern via the `abort()` function returned alongside the `done` promise.

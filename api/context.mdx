@@ -1,0 +1,237 @@
+---
+title: "ResearchContext: Session Memory for Research Pipelines"
+sidebarTitle: "ResearchContext"
+description: "ResearchContext tracks queries, source credibility scores, fetched page content, and knowledge gaps across all stages of a research session."
+---
+
+`ResearchContext` is the shared memory object threaded through every stage of a research session. It accumulates the search queries that have been run, the credibility scores of discovered sources, the cleaned text of fetched pages, and the gap analysis results. Passing a single `ResearchContext` instance to `search_web`, `fetch_page`, and `run_tool_use_loop` ensures that work is never duplicated — cached pages are returned instantly, scored sources are stored once, and follow-up queries build on the same knowledge base as the primary search.
+
+```python
+from context import ResearchContext
+```
+
+---
+
+## Constructor
+
+```python
+ResearchContext(question: str)
+```
+
+<ParamField path="question" type="str" required>
+  The original research question for this session. Stored as
+  `context.question` and used by `add_search_results` to score incoming
+  sources for relevance to this specific query.
+</ParamField>
+
+---
+
+## Attributes
+
+The following public attributes are available on every `ResearchContext` instance. They are populated progressively as the pipeline advances.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `question` | `str` | The original research question passed to the constructor |
+| `queries_made` | `list[str]` | Deduplicated list of all search queries run in this session |
+| `source_metadata` | `dict[str, dict]` | URL → `{title, snippet, score, fetched}` for every discovered source |
+| `sources_fetched` | `dict[str, str]` | URL → cleaned page text for every successfully fetched page |
+| `established_facts` | `list[str]` | Deduplicated list of facts stored during the session |
+| `plan` | `dict \| None` | The research plan from `plan_research()`, or `None` before planning |
+| `gaps` | `list[str]` | Gap descriptions from `find_gaps()`, populated after the primary search phase |
+| `follow_up_queries` | `list[str]` | Follow-up query strings from `find_gaps()`, used in the secondary search phase |
+
+### `source_metadata` entry shape
+
+Each value in `source_metadata` is a dict with these keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `title` | `str` | Page title from the DuckDuckGo result |
+| `snippet` | `str` | DuckDuckGo-provided text excerpt |
+| `score` | `float` | Credibility score `[0.0, 1.0]` computed by `score_source()` |
+| `fetched` | `bool` | `True` once `add_fetched_page` has been called for this URL |
+
+---
+
+## Pipeline Flow
+
+`ResearchContext` is populated in stages that mirror the research pipeline:
+
+```
+Constructor          → question set
+plan_research()      → context.plan populated
+search_web()         → queries_made grows; source_metadata filled with scores
+fetch_page()         → sources_fetched filled; source_metadata[url]["fetched"] = True
+find_gaps()          → context.gaps and context.follow_up_queries populated
+(repeat search/fetch for follow-up queries)
+generate_report()    → reads source_metadata and sources_fetched
+```
+
+---
+
+## Methods
+
+### `add_query()`
+
+```python
+def add_query(query: str) -> None
+```
+
+Logs a search query to `queries_made`. Duplicates are silently ignored, so it is safe to call this multiple times with the same string.
+
+<ParamField path="query" type="str" required>
+  The search query string to record.
+</ParamField>
+
+---
+
+### `add_search_results()`
+
+```python
+def add_search_results(results: list[dict[str, str]], question: str) -> None
+```
+
+Stores DuckDuckGo search results into `source_metadata`, scoring each URL with `score_source()`. URLs already present in `source_metadata` are skipped to avoid overwriting existing scores.
+
+<ParamField path="results" type="list[dict[str, str]]" required>
+  A list of result dicts as returned by `search_web()`, each containing
+  `title`, `url`, and `snippet` keys.
+</ParamField>
+
+<ParamField path="question" type="str" required>
+  The research question used to compute relevance scores. Pass
+  `context.question` to score against the original session question.
+</ParamField>
+
+---
+
+### `add_fetched_page()`
+
+```python
+def add_fetched_page(url: str, content: str) -> None
+```
+
+Caches cleaned page content for a URL and marks `source_metadata[url]["fetched"]` as `True`. Called automatically by `fetch_page()` after a successful retrieval.
+
+<ParamField path="url" type="str" required>
+  The URL of the fetched page.
+</ParamField>
+
+<ParamField path="content" type="str" required>
+  The cleaned, truncated text content of the page.
+</ParamField>
+
+---
+
+### `is_fetched()`
+
+```python
+def is_fetched(url: str) -> bool
+```
+
+Returns `True` if `url` has already been fetched and cached in this session. Used by `fetch_page()` to short-circuit redundant network requests.
+
+<ParamField path="url" type="str" required>
+  The URL to check.
+</ParamField>
+
+**Returns:** `bool`
+
+---
+
+### `get_fetched_content()`
+
+```python
+def get_fetched_content(url: str) -> str
+```
+
+Returns the cached page content for `url`, or an empty string if the URL has not been fetched yet.
+
+<ParamField path="url" type="str" required>
+  The URL whose content to retrieve.
+</ParamField>
+
+**Returns:** `str` — Cleaned page text, or `""` if not in cache.
+
+---
+
+### `get_score()`
+
+```python
+def get_score(url: str) -> float
+```
+
+Returns the credibility score for a URL. If the URL is already in `source_metadata`, the stored score is returned immediately. Otherwise, `score_source()` is called with an empty snippet to compute and cache the score.
+
+<ParamField path="url" type="str" required>
+  The URL to score.
+</ParamField>
+
+**Returns:** `float` — Credibility score in `[0.0, 1.0]`.
+
+---
+
+### `add_established_fact()`
+
+```python
+def add_established_fact(fact: str) -> None
+```
+
+Stores a fact string in `established_facts`. Duplicates are silently ignored.
+
+<ParamField path="fact" type="str" required>
+  A concise statement of an established finding from the research session.
+</ParamField>
+
+---
+
+### `get_all_sources()`
+
+```python
+def get_all_sources() -> list[dict[str, Any]]
+```
+
+Returns all tracked sources as a flat list of dicts, suitable for passing to `format_citations()` or for building a sources section in a custom report.
+
+**Returns:** `list[dict]` — Each entry contains:
+
+| Key | Type | Description |
+|---|---|---|
+| `url` | `str` | The source URL |
+| `title` | `str` | Page title |
+| `score` | `float` | Credibility score |
+| `fetched` | `bool` | Whether the page content was retrieved |
+
+---
+
+## Usage Example
+
+```python
+from context import ResearchContext
+from tools import search_web, fetch_page
+
+# Create a context for the session
+ctx = ResearchContext(question="How does CRISPR-Cas9 compare to base editing?")
+
+# Stage 1: search and auto-score sources
+results = search_web("CRISPR-Cas9 vs base editing mechanisms", context=ctx)
+
+print(f"Queries made: {ctx.queries_made}")
+print(f"Sources discovered: {len(ctx.source_metadata)}")
+
+# Stage 2: fetch the top result
+if results:
+    top_url = results[0]["url"]
+    content = fetch_page(top_url, context=ctx)
+    print(f"Fetched {top_url}: {len(content)} chars")
+
+# Inspect cache state
+print(f"Pages fetched: {len(ctx.sources_fetched)}")
+print(f"Top source score: {ctx.get_score(top_url):.2f}")
+
+# List all sources with metadata
+for source in ctx.get_all_sources():
+    status = "✓" if source["fetched"] else "○"
+    print(f"  [{status}] {source['score']:.2f}  {source['url']}")
+```

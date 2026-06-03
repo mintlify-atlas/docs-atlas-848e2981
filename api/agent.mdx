@@ -1,0 +1,247 @@
+---
+title: "AgentRunner: Python Class for Deep Research Automation"
+sidebarTitle: "AgentRunner"
+description: "AgentRunner runs the five-stage research pipeline in Python. Call research() with an optional on_progress callback to get a fully cited markdown report."
+---
+
+`AgentRunner` is the central entry point for Deep Research Agent. It manages the full research lifecycle — from planning and multi-phase web search to gap analysis and final report synthesis — using Google Gemini as the underlying language model. Once instantiated, a single call to `research()` is all that is needed to produce a structured, cited markdown report from a natural-language question.
+
+```python
+from agent import AgentRunner, ResearchAgent
+```
+
+---
+
+## Constructor
+
+```python
+AgentRunner(api_key: str | None = None, provider: str | None = None)
+```
+
+Initializes the Gemini client and sets up the runner. If `api_key` is omitted, the constructor reads from the `GEMINI_API_KEY` environment variable. Raises `ValueError` if no key is available.
+
+<ParamField path="api_key" type="str" optional>
+  Your Google Gemini API key. Defaults to the `GEMINI_API_KEY` environment
+  variable when not supplied. Raise `ValueError` is thrown if neither is set.
+</ParamField>
+
+<ParamField path="provider" type="str" optional>
+  The LLM provider to use. Currently only `"gemini"` is supported; this
+  parameter is reserved for future extensibility. Defaults to `"gemini"`.
+</ParamField>
+
+---
+
+## Methods
+
+### `research()`
+
+```python
+def research(
+    question: str,
+    on_progress: Callable[[str, str], None] | None = None,
+) -> str
+```
+
+Runs the complete five-stage research pipeline and returns a full markdown report with citations. This is the primary method most callers will use.
+
+**Stages executed internally:**
+1. **Plan** — `plan_research()` breaks the question into typed sub-queries.
+2. **Primary search** — Tool-use loop performs web searches and page fetches.
+3. **Gap analysis** — `find_gaps()` identifies unanswered areas.
+4. **Follow-up search** — A second tool-use loop covers the identified gaps.
+5. **Synthesis** — `ReportGenerator` assembles the final cited report.
+
+<ParamField path="question" type="str" required>
+  The natural-language research question. Recommended length is 3–2 000
+  characters. For example: `"What are the environmental impacts of
+  deep-sea lithium mining?"`.
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Optional callback invoked throughout execution. Receives two string
+  arguments: `event_type` and `detail`. See the progress event table below.
+</ParamField>
+
+**Returns:** `str` — A complete markdown research report with inline citations.
+
+**Raises:** `ValueError` if `GEMINI_API_KEY` is not set.
+
+#### Progress Events
+
+The `on_progress` callback fires with the following `(event_type, detail)` pairs in order:
+
+| `event_type` | `detail` example | When fired |
+|---|---|---|
+| `"start"` | The original question string | Research begins |
+| `"thinking"` | `"Creating research plan..."` | Before plan generation |
+| `"plan"` | `"Type: factual, Strategy: breadth-first, Queries: Q1, Q2"` | Plan created |
+| `"thinking"` | `"Iteration 1"` | Each tool-use iteration |
+| `"search"` | The query string sent to DuckDuckGo | Each web search |
+| `"fetch"` | The URL being retrieved | Each page fetch |
+| `"block"` | `"https://example.com (score: 0.32)"` | A URL blocked by credibility filter |
+| `"gaps"` | `"Gaps found: 2, Follow-up queries: ..."` | After gap analysis |
+| `"thinking"` | `"Synthesizing final research report..."` | Before synthesis |
+| `"done"` | `"Research complete."` | Pipeline finished |
+
+#### Usage Example
+
+```python
+from agent import AgentRunner
+
+def handle_progress(event_type: str, detail: str) -> None:
+    if event_type == "search":
+        print(f"  🔍 Searching: {detail}")
+    elif event_type == "fetch":
+        print(f"  📄 Fetching: {detail}")
+    elif event_type == "thinking":
+        print(f"  💭 {detail}")
+    elif event_type == "done":
+        print("  ✅ Research complete.")
+
+runner = AgentRunner()  # reads GEMINI_API_KEY from environment
+
+report = runner.research(
+    question="What are the long-term effects of microplastics on marine ecosystems?",
+    on_progress=handle_progress,
+)
+
+print(report)
+```
+
+---
+
+### `plan_research()`
+
+```python
+def plan_research(question: str) -> dict
+```
+
+Generates a structured research plan for the given question. Called internally by `research()` during Stage 1, but also available for direct use when you want to inspect or customize the plan before executing it.
+
+<ParamField path="question" type="str" required>
+  The research question to plan for.
+</ParamField>
+
+**Returns:** `dict` with the following keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `question_type` | `str` | One of `"factual"`, `"comparative"`, `"exploratory"`, or `"technical"` |
+| `search_strategy` | `str` | Textual description of the search approach, e.g. `"breadth-first"` |
+| `prioritized_sub_queries` | `list[dict]` | Ordered sub-queries, each with `query` (str), `priority` (`"High"` \| `"Medium"` \| `"Low"`), and `reasoning` (str) |
+
+Falls back to a single-query plan if the Gemini response cannot be parsed as JSON.
+
+```python
+plan = runner.plan_research("How does CRISPR-Cas9 differ from base editing?")
+
+print(plan["question_type"])         # "comparative"
+print(plan["search_strategy"])       # "breadth-first"
+for sub in plan["prioritized_sub_queries"]:
+    print(sub["priority"], sub["query"])
+```
+
+---
+
+### `find_gaps()`
+
+```python
+def find_gaps(question: str, findings_so_far: str) -> dict
+```
+
+Analyzes the results collected so far and identifies knowledge gaps that require follow-up searches. Called internally after the primary search phase.
+
+<ParamField path="question" type="str" required>
+  The original research question.
+</ParamField>
+
+<ParamField path="findings_so_far" type="str" required>
+  A string summary of the intermediate findings accumulated in the primary
+  search phase — typically the output of the first `run_tool_use_loop()` call.
+</ParamField>
+
+**Returns:** `dict` with the following keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `gaps` | `list[str]` | Descriptions of unanswered areas or missing information |
+| `follow_up_queries` | `list[str]` | New search query strings to fill those gaps |
+
+Falls back to `{"gaps": ["Unclear findings"], "follow_up_queries": []}` if parsing fails.
+
+```python
+gaps = runner.find_gaps(
+    question="Effects of microplastics on marine ecosystems",
+    findings_so_far=primary_findings,
+)
+
+for gap in gaps["gaps"]:
+    print("Gap:", gap)
+for q in gaps["follow_up_queries"]:
+    print("Follow-up:", q)
+```
+
+---
+
+### `run_tool_use_loop()`
+
+```python
+def run_tool_use_loop(
+    context: ResearchContext,
+    system_instruction: str,
+    prompt: str,
+    on_progress: Callable[[str, str], None] | None = None,
+    max_iterations: int = 5,
+) -> str
+```
+
+Executes one phase of the Gemini tool-use loop — repeatedly invoking Gemini, dispatching tool calls (`search_web`, `fetch_page`, `score_source`), and feeding results back until Gemini returns a plain-text response or `max_iterations` is reached. The `research()` method calls this twice: once for the primary search phase and once for the follow-up gap-filling phase.
+
+<ParamField path="context" type="ResearchContext" required>
+  The active session memory object. Caches fetched pages, tracks credibility
+  scores, and accumulates source metadata across iterations.
+</ParamField>
+
+<ParamField path="system_instruction" type="str" required>
+  The Gemini system prompt for this research phase. Controls the model's
+  role and research behavior during the loop.
+</ParamField>
+
+<ParamField path="prompt" type="str" required>
+  The user-facing prompt for this phase, typically constructed from the
+  original question and the current set of sub-queries.
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Optional progress callback forwarded to `search_web` and `fetch_page`
+  during tool execution. Same signature as in `research()`.
+</ParamField>
+
+<ParamField path="max_iterations" type="int" optional>
+  Maximum number of tool-call iterations before the loop terminates.
+  Defaults to `5` (equivalent to `MAX_ITERATIONS // 2`). Increasing this
+  allows deeper exploration at the cost of latency and token usage.
+</ParamField>
+
+**Returns:** `str` — The final plain-text output from Gemini, representing an intermediate findings summary for this phase.
+
+---
+
+## `ResearchAgent`
+
+`ResearchAgent` is a subclass of `AgentRunner` provided for backward compatibility. It exposes an identical interface and can be used as a drop-in replacement wherever `AgentRunner` is referenced.
+
+<Note>
+  `ResearchAgent` exists solely to avoid breaking existing integrations. New
+  code should use `AgentRunner` directly. Both classes share 100% of their
+  implementation — there is no behavioral difference.
+</Note>
+
+```python
+from agent import ResearchAgent
+
+# Identical to AgentRunner in every way
+agent = ResearchAgent()
+report = agent.research("What is the current state of fusion energy research?")
+```

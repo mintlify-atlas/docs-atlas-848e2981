@@ -1,0 +1,87 @@
+---
+title: "Deep Research Agent REST API Overview"
+sidebarTitle: "Overview"
+description: "The Deep Research Agent exposes a FastAPI REST interface with endpoints for health checks, status, batch research, and Server-Sent Events streaming."
+---
+
+The Deep Research Agent ships with a [FastAPI](https://fastapi.tiangolo.com/) server that exposes five HTTP endpoints. Two endpoints handle infrastructure concerns (liveness and configuration status), two handle research queries (synchronous batch and streaming), and one serves the built-in web UI. All request and response bodies use JSON, except the streaming endpoint which returns a Server-Sent Events (`text/event-stream`) response. No authentication token is required from API callers — the server reads your LLM provider credentials from a `.env` file at startup and manages them entirely server-side.
+
+## Starting the server
+
+Run the following command from the repository root to start the API server with auto-reload enabled:
+
+```bash
+cd research_agent
+uvicorn server:app --reload --host 127.0.0.1 --port 8000
+```
+
+Once running, the server is reachable at:
+
+```
+http://127.0.0.1:8000
+```
+
+All API endpoints are served under that base URL. For example, the health endpoint is at `http://127.0.0.1:8000/api/health`.
+
+## Endpoints at a glance
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Serves the built-in static web UI (`static_ui.html`). |
+| `GET` | `/api/health` | Liveness probe — always returns `{"status": "ok"}` when the process is up. |
+| `GET` | `/api/status` | Reports whether the LLM provider is configured and which model is active. |
+| `POST` | `/api/research` | Runs the full research pipeline and returns the completed report synchronously. |
+| `POST` | `/api/research/stream` | Runs the research pipeline and streams live progress events via SSE. |
+
+See the individual endpoint pages for full request/response schemas:
+
+- [Health & Status](/api/health) — `GET /api/health` and `GET /api/status`
+- [POST /research](/api/research) — synchronous batch research
+- [POST /research/stream](/api/research-stream) — streaming SSE research
+
+## Authentication
+
+No API token or `Authorization` header is required to call any endpoint. The server reads the LLM provider API key (e.g. `GEMINI_API_KEY`) from a `.env` file at startup. If the key is missing, the server still starts but research endpoints will return a `500` error. Use `GET /api/status` to verify the key is loaded correctly before sending research requests.
+
+<Note>
+  Keep your `.env` file out of version control. The API key is never returned by any endpoint — it is resolved entirely within the server process.
+</Note>
+
+## CORS
+
+The server is configured with the following allowed origins:
+
+```
+http://localhost:5173
+http://127.0.0.1:5173
+http://localhost:3000
+```
+
+Requests from any other origin will be rejected by the browser's CORS policy. If you need to call the API from a different origin during development, update the `allow_origins` list in `server.py` and restart the server.
+
+All HTTP methods and all headers are permitted for the allowed origins, and credentialed requests (`allow_credentials=True`) are supported.
+
+## Request format
+
+For the two `POST` endpoints, send a JSON body with the `Content-Type: application/json` header:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/research \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the latest advances in fusion energy?"}'
+```
+
+The `GET` endpoints accept no request body or query parameters.
+
+## Response format
+
+All non-streaming endpoints return JSON. HTTP status codes follow standard semantics:
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success — body contains the expected JSON payload. |
+| `400` | Bad request — the `question` field is empty after stripping whitespace. |
+| `422` | Unprocessable entity — request body is malformed or fails Pydantic validation (e.g. question shorter than 3 characters or longer than 2000). |
+| `500` | Server error — body is `{"detail": "<message>"}`. Typically caused by a missing API key or an unrecoverable research failure. |
+
+The streaming endpoint (`POST /api/research/stream`) returns `Content-Type: text/event-stream`. Each SSE message carries a JSON object; see the [POST /research/stream](/api/research-stream) page for the full event catalogue.

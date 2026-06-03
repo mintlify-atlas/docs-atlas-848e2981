@@ -1,0 +1,75 @@
+---
+title: "Deep Research Agent: Autonomous AI Web Research Tool"
+sidebarTitle: "Introduction"
+description: "Deep Research Agent uses Google Gemini and DuckDuckGo to autonomously search, score sources, and synthesize cited markdown research reports from any question."
+---
+
+Deep Research Agent is a Python-based autonomous research tool that turns a single natural-language question into a fully cited, structured markdown report—without any manual search, copy-pasting, or source evaluation on your part. Powered by Google Gemini and DuckDuckGo, it decomposes your question into focused sub-queries, retrieves and scores web sources for credibility, detects gaps in its initial findings, runs a second round of targeted research, and finally synthesizes everything into a clean, referenced document. A companion React frontend gives you an interactive browser-based interface with real-time streaming progress, while a CLI lets you embed it directly into scripts and pipelines.
+
+## The Research Pipeline
+
+Deep Research Agent follows a deterministic five-stage pipeline on every query. Each stage is driven by Gemini's tool-use capabilities, so the model decides what to search, what to read, and when it has gathered enough information to write.
+
+<Steps>
+  <Step title="Plan">
+    Gemini receives your question and decomposes it into a set of focused sub-questions that, together, cover the full scope of the topic. This decomposition step ensures the agent pursues multiple angles rather than anchoring on the first search result it finds.
+  </Step>
+  <Step title="First-Round Research">
+    For each sub-question, the agent calls `search_web` via DuckDuckGo, collects up to five candidate URLs, scores each domain for credibility, and fetches the page content of qualifying sources. Low-credibility URLs are blocked before any text is read.
+  </Step>
+  <Step title="Gap Detection">
+    Gemini reviews the collected evidence and identifies sub-questions that remain unanswered or only partially covered. This produces a second set of targeted queries directed at the specific gaps.
+  </Step>
+  <Step title="Second-Round Research">
+    The gap queries are executed with the same `search_web` → `fetch_page` loop, surfacing additional sources to fill the holes identified in the previous stage.
+  </Step>
+  <Step title="Synthesis">
+    With all evidence gathered, Gemini writes a final markdown report—an executive summary, key findings organised by theme, and an inline-cited sources section—using only the material retrieved in the previous stages.
+  </Step>
+</Steps>
+
+## Key Capabilities
+
+**Gemini-powered reasoning.** The `gemini-2.0-flash` model drives every decision in the pipeline: question decomposition, tool invocation, gap analysis, and final prose generation. If the primary model is unavailable, the agent automatically retries and falls back through a chain of Gemini variants.
+
+**DuckDuckGo search.** All web searches are performed through DuckDuckGo—no API key required for search itself, and no query data sent to Google or Bing.
+
+**Credibility scoring.** Before fetching any page, the agent scores the source domain. URLs that fall below a configurable minimum credibility threshold are blocked and logged to stderr, so your report is built only from sources that meet the bar.
+
+**SSE streaming.** The FastAPI backend emits Server-Sent Events as the agent works, so the React frontend (and any SSE-capable client) can display live progress: each search query, each page fetch, and each blocked URL appear in real time.
+
+**CLI and web UI.** Run `python main.py "your question"` for a terminal workflow with optional `--verbose` logging and `-o` file output, or start the FastAPI + React stack for an interactive browser interface.
+
+## Architecture
+
+The project is split into two self-contained directories that communicate over a local HTTP API.
+
+```
+deep-research-agent/
+├── research_agent/          # Python package — agent logic and API server
+│   ├── main.py              # CLI entry point
+│   ├── agent.py             # Five-stage research pipeline
+│   ├── gemini_client.py     # Gemini API client with retry/fallback
+│   ├── tools.py             # search_web and fetch_page tool implementations
+│   ├── credibility.py       # Domain credibility scoring
+│   ├── server.py            # FastAPI + SSE backend
+│   ├── config.py            # Agent constraints (iterations, page size, etc.)
+│   └── requirements.txt
+└── frontend/                # React 19 app
+    ├── src/
+    │   └── App.jsx          # Main UI — query input, streaming progress, report view
+    └── package.json
+```
+
+The Python package handles all research logic and exposes a single `/research` endpoint that streams SSE events. The React frontend consumes that stream and renders the final report using `react-markdown` with GitHub Flavored Markdown support.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install dependencies, set your API key, and run your first research query in under five minutes.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Set environment variables, choose a Gemini model variant, and understand agent constraints.
+  </Card>
+</CardGroup>

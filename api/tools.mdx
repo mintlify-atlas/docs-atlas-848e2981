@@ -1,0 +1,265 @@
+---
+title: "tools.py: Web Search and Page Fetch Functions"
+sidebarTitle: "tools"
+description: "search_web queries DuckDuckGo for up to 5 results, fetch_page cleans HTML, score_source rates credibility 0-1, and run_tool dispatches all three tools by name."
+---
+
+The `tools` module provides the four core functions that power Deep Research Agent's information-gathering layer. `search_web` and `fetch_page` are invoked directly by Gemini during the tool-use loop; `score_source` computes credibility scores used to filter low-quality sources; and `run_tool` acts as a unified dispatcher that the loop uses to execute any of the three by name. All functions integrate with `ResearchContext` to cache results and deduplicate work across iterations.
+
+```python
+from tools import search_web, fetch_page, score_source, run_tool
+```
+
+---
+
+## Module Constants
+
+These constants govern fetch and search behavior across the module and can be used as reference values when setting up custom pipelines.
+
+| Constant | Value | Description |
+|---|---|---|
+| `MAX_SEARCH_RESULTS` | `5` | Maximum results returned per `search_web` call |
+| `MAX_PAGE_CHARS` | `3000` | Character limit applied by `fetch_page` after cleaning |
+| `REQUEST_TIMEOUT` | `15` | HTTP request timeout in seconds |
+
+---
+
+## `search_web()`
+
+```python
+def search_web(
+    query: str,
+    context: Any = None,
+    on_progress: Callable[[str, str], None] | None = None,
+) -> list[dict[str, str]]
+```
+
+Searches the web via DuckDuckGo and returns up to five results. Uses the `ddgs` library as the primary backend with `duckduckgo_search` as a fallback. Results are automatically scored and stored in `context` if one is provided.
+
+<ParamField path="query" type="str" required>
+  The search query string to send to DuckDuckGo.
+</ParamField>
+
+<ParamField path="context" type="ResearchContext" optional>
+  An active `ResearchContext` instance. When provided, the function calls
+  `context.add_query(query)` to log the query and
+  `context.add_search_results(results, question)` to score and store each
+  returned URL in `source_metadata`.
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Optional progress callback. Fires `("search", query)` immediately before
+  the DuckDuckGo request is made.
+</ParamField>
+
+**Returns:** `list[dict[str, str]]` — Up to 5 result dicts, each containing:
+
+| Key | Type | Description |
+|---|---|---|
+| `title` | `str` | Page title from the search result |
+| `url` | `str` | Full URL of the result |
+| `snippet` | `str` | DuckDuckGo-provided text excerpt |
+
+Returns an empty list `[]` if the search fails for any reason (exception is caught and logged).
+
+#### Usage Example
+
+```python
+from tools import search_web
+from context import ResearchContext
+
+ctx = ResearchContext(question="Effects of microplastics on marine life")
+
+results = search_web(
+    query="microplastics ocean fish toxicity 2024",
+    context=ctx,
+    on_progress=lambda e, d: print(f"[{e}] {d}"),
+)
+
+for r in results:
+    print(r["title"], r["url"])
+```
+
+---
+
+## `fetch_page()`
+
+```python
+def fetch_page(
+    url: str,
+    context: Any = None,
+    on_progress: Callable[[str, str], None] | None = None,
+) -> str
+```
+
+Fetches a web page, strips navigational and decorative HTML, and returns clean readable text truncated to `MAX_PAGE_CHARS` (3 000 characters). Integrates with `ResearchContext` for caching and credibility filtering.
+
+**Processing pipeline:**
+1. Checks `context.is_fetched(url)` — returns cached content immediately if already fetched.
+2. Computes the credibility score for the URL. If the score is at or below `MIN_CREDIBILITY_SCORE` (0.5), the fetch is blocked.
+3. Issues a `GET` request with the `ResearchAgent/1.0` User-Agent and a 15-second timeout.
+4. Validates that the `Content-Type` is `text/html` or `application/xhtml`.
+5. Strips `<script>`, `<style>`, `<nav>`, `<footer>`, `<header>`, and `<aside>` tags via BeautifulSoup.
+6. Extracts plain text, normalizes whitespace, and truncates at a word boundary.
+
+<ParamField path="url" type="str" required>
+  The fully-qualified URL of the page to fetch.
+</ParamField>
+
+<ParamField path="context" type="ResearchContext" optional>
+  An active `ResearchContext` instance. Used for cache lookup
+  (`is_fetched`), credibility filtering (`get_score`), and storing the
+  result (`add_fetched_page`).
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Optional progress callback. Fires `("fetch", url)` when a fetch begins
+  and `("block", url)` when a URL is rejected by the credibility filter.
+</ParamField>
+
+**Returns:** `str` — Cleaned page text up to 3 000 characters, or an empty string on failure or if the URL is blocked.
+
+<Note>
+  Calling `fetch_page` for a URL that has already been fetched in the same
+  session returns the cached content instantly without making a network
+  request. This prevents redundant fetches across multiple tool-use
+  iterations.
+</Note>
+
+#### Usage Example
+
+```python
+from tools import fetch_page
+from context import ResearchContext
+
+ctx = ResearchContext(question="Deep-sea lithium mining")
+
+content = fetch_page(
+    url="https://example.edu/deep-sea-mining-report",
+    context=ctx,
+    on_progress=lambda e, d: print(f"[{e}] {d}"),
+)
+
+print(content[:500])
+```
+
+---
+
+## `score_source()`
+
+```python
+def score_source(url: str, snippet: str, question: str) -> float
+```
+
+Computes a credibility score between `0.0` and `1.0` for a given source URL and snippet. The score combines domain authority, keyword relevance, and recency signals.
+
+<ParamField path="url" type="str" required>
+  The URL of the source to score. The domain is extracted and matched
+  against known domain tiers.
+</ParamField>
+
+<ParamField path="snippet" type="str" required>
+  The DuckDuckGo snippet or a short excerpt from the page. Used for both
+  relevance and recency scoring.
+</ParamField>
+
+<ParamField path="question" type="str" required>
+  The original research question. Content words from the question (excluding
+  common stopwords) are compared against the snippet to compute relevance.
+</ParamField>
+
+**Returns:** `float` — A score in `[0.0, 1.0]` computed as:
+
+```
+score = (domain_score × 0.4) + (relevance_score × 0.5) + recency_score
+```
+
+**Score components:**
+
+| Component | Weight | Calculation |
+|---|---|---|
+| `domain_score` | 0.4 | `.edu`/`.gov` → 0.9 · `.org` → 0.7 · major domains → 0.8 · social media → 0.3 · other → 0.4 |
+| `relevance_score` | 0.5 | Fraction of non-stopword question words present in the snippet |
+| `recency_score` | 0.1 | +0.1 if snippet contains a `202x` year or a relative time expression |
+
+Sources with a final score ≤ `0.5` are blocked by `fetch_page`.
+
+---
+
+## `run_tool()`
+
+```python
+def run_tool(
+    name: str,
+    tool_input: dict[str, Any],
+    context: Any = None,
+    on_progress: Callable[[str, str], None] | None = None,
+) -> str
+```
+
+Dispatches a tool call by name and returns a JSON-serialized string result. This is the function Gemini's tool-use loop calls directly — it maps tool names to their implementations and handles serialization and error formatting uniformly.
+
+<ParamField path="name" type="str" required>
+  The tool name to execute. Supported values: `"search_web"`,
+  `"fetch_page"`, `"score_source"`.
+</ParamField>
+
+<ParamField path="tool_input" type="dict[str, Any]" required>
+  Input arguments for the tool. Required keys depend on the tool:
+
+  - `"search_web"` → `{"query": str}`
+  - `"fetch_page"` → `{"url": str}`
+  - `"score_source"` → `{"url": str, "snippet": str}`
+</ParamField>
+
+<ParamField path="context" type="ResearchContext" optional>
+  Passed through to the underlying tool function for caching and
+  context tracking.
+</ParamField>
+
+<ParamField path="on_progress" type="Callable[[str, str], None]" optional>
+  Passed through to the underlying tool function for progress reporting.
+</ParamField>
+
+**Returns:** `str` — A JSON-serialized string. Shape depends on the tool:
+
+| Tool | Success shape | Error shape |
+|---|---|---|
+| `"search_web"` | `{"results": [{title, url, snippet}, ...]}` | `{"error": "..."}` |
+| `"fetch_page"` | `{"url": str, "content": str}` | `{"error": "..."}` |
+| `"score_source"` | `{"url": str, "credibility_score": float}` | `{"error": "..."}` |
+| Unknown name | — | `{"error": "Unknown tool: <name>"}` |
+
+<Tip>
+  Use `run_tool` whenever you need to invoke tools programmatically without
+  knowing the specific function at call time — for example, when replaying a
+  recorded sequence of Gemini tool calls or building a custom tool-use harness.
+  It handles JSON serialization and error formatting for all three tools
+  uniformly.
+</Tip>
+
+```python
+import json
+from tools import run_tool
+from context import ResearchContext
+
+ctx = ResearchContext(question="Fusion energy progress 2024")
+
+# Search
+result_json = run_tool("search_web", {"query": "fusion energy 2024"}, context=ctx)
+data = json.loads(result_json)
+for r in data["results"]:
+    print(r["title"], r["url"])
+
+# Fetch
+page_json = run_tool("fetch_page", {"url": data["results"][0]["url"]}, context=ctx)
+page = json.loads(page_json)
+print(page["content"][:300])
+
+# Score
+score_json = run_tool(
+    "score_source",
+    {"url": data["results"][0]["url"], "snippet": data["results"][0]["snippet"]},
+)
+print(json.loads(score_json)["credibility_score"])
+```

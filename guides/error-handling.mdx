@@ -1,0 +1,93 @@
+---
+title: "Error Handling and Troubleshooting Deep Research Agent"
+sidebarTitle: "Error Handling"
+description: "Search failures, fetch timeouts, and Gemini errors are caught and logged; research continues unless the API key is absent or the 10-iteration cap is reached."
+---
+
+Deep Research Agent is designed to keep running even when individual steps fail. Search queries that return nothing, web pages that time out, and transient Gemini API errors all have defined fallback behaviors that allow the research loop to continue. Only two conditions stop the agent entirely: a missing API key and an unrecoverable research failure after the maximum number of iterations.
+
+## Error Scenarios at a Glance
+
+| Scenario | Cause | Agent behavior |
+|---|---|---|
+| Missing `GEMINI_API_KEY` | `.env` not configured | Raises `ValueError`, exits with code 1 (CLI) or returns HTTP 500 (API) |
+| Gemini API 429 / 5xx | Rate limit or transient server error | Retries up to 3 times per model with exponential backoff, then tries next model |
+| Search failure (ddgs error) | DuckDuckGo library error | Returns empty result list; agent continues to next step |
+| Fetch timeout | Page took longer than 15 seconds | Returns empty content; agent skips the URL and continues |
+| Non-HTML content | PDF, binary, or unsupported MIME type | Returns empty content; agent skips the URL and continues |
+| Credibility block | URL scored below threshold | URL skipped; `🚫 Blocked` logged to stderr (CLI) or `block` event sent (UI) |
+| Tool error (general) | Any exception inside `run_tool` | Exception caught, JSON error string returned; research continues |
+| Max iterations reached (10) | Research loop hit the iteration cap | Partial report generated; warning printed to stderr |
+| UI cancel | User clicked Cancel in the browser | `AbortController` aborts SSE fetch; loading state cleared cleanly |
+
+## Missing API Key
+
+<Warning>
+The agent **cannot start** without a valid `GEMINI_API_KEY`. This is the only configuration error that causes an immediate, non-recoverable failure.
+</Warning>
+
+If the environment variable is absent when the agent initializes, a `ValueError` is raised with a clear message:
+
+```
+ValueError: GEMINI_API_KEY is not set. Add it to research_agent/.env
+```
+
+**On the CLI** this message is printed to stderr and the process exits with code **1**.
+
+**Via the API** the server catches the exception and returns an **HTTP 500** response with the same message in the response body — the SSE stream never opens.
+
+To fix this, create or update `research_agent/.env`:
+
+```bash
+GEMINI_API_KEY=your_api_key_here
+```
+
+## Gemini API Errors and Retry Strategy
+
+When the Gemini API returns a retryable HTTP status code — **429** (rate limited), **500**, **502**, **503**, or **504** — the agent automatically retries the request using exponential backoff before giving up on the current model.
+
+| Attempt | Delay before retry |
+|---|---|
+| 1st retry | 2 seconds (2¹ × 2) |
+| 2nd retry | 4 seconds (2² × 2) |
+| 3rd retry | 8 seconds (2³ × 2) |
+
+After **3 failed attempts** (`MAX_RETRIES_PER_MODEL = 3`) on a given model the agent falls back to the next model in its internal `FALLBACK_MODELS` list and starts the retry counter fresh. This means a temporary Gemini outage or rate-limit burst will usually resolve itself transparently before the user sees any error.
+
+## Search Failures
+
+If the DuckDuckGo search library (`ddgs`) raises an exception during a query — due to network issues or upstream blocks — the agent catches the error, returns an empty result list for that query, and continues the research loop. No search failure is fatal; the agent simply proceeds with fewer results for that particular query.
+
+## Fetch Failures
+
+Every HTTP fetch has a **15-second timeout** (`REQUEST_TIMEOUT = 15`). If a page does not respond in time, or returns non-HTML content (such as a PDF or a binary file), the fetch returns empty content. The agent logs the failure and moves on to the next URL without interrupting the research pipeline.
+
+## Tool Errors
+
+All tool calls are wrapped in a `try/except` block inside `run_tool`. If any tool raises an unexpected exception the agent catches it, serializes a JSON error string as the tool result, and continues the research loop. This means even an unanticipated bug in a single tool cannot crash the entire research session.
+
+## Maximum Iterations
+
+The agent will not run the research loop indefinitely. After **10 iterations** it stops gathering new information, generates a report from whatever it has collected, and prints a warning to stderr:
+
+```
+Warning: max iterations reached — report may be incomplete.
+```
+
+If you receive an incomplete report on a broad question, consider narrowing the scope so the agent can cover the topic within the iteration limit.
+
+## UI Cancellation
+
+Clicking **Cancel** in the web interface calls `AbortController.abort()` on the in-flight SSE fetch. The browser immediately drops the connection, the frontend clears its loading state, and the activity log entries already received remain visible. The backend stream may continue briefly until it detects the disconnected client, but no further events are sent to the UI.
+
+## Debugging Tips
+
+<Tip>
+Run the CLI with `--verbose` to see every internal event in the format `[EVENT_TYPE] detail`. This shows the full research plan, every search query, every URL fetched, gap-analysis output, and any errors encountered — making it straightforward to identify exactly where a research run went wrong or why a report is incomplete.
+</Tip>
+
+```bash
+python main.py --verbose "Your research question here" 2>debug.log
+```
+
+Redirecting stderr to a file lets you review the full event log after the run completes without mixing it with the report output on stdout.

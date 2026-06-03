@@ -1,0 +1,185 @@
+---
+title: "Source Credibility Scoring: How the Agent Filters Sources"
+sidebarTitle: "Credibility Scoring"
+description: "The agent scores every source 0–1 using domain authority, snippet relevance, and recency signals. Sources at or below 0.5 are blocked before fetching."
+---
+
+Every URL that surfaces in a search result is scored before the agent decides whether to fetch it. The `score_source` function produces a single float between 0.0 and 1.0 by combining three independent signals: how trustworthy the domain is as a category, how relevant the result snippet is to the research question, and whether the snippet contains recency indicators. Sources that score at or below the minimum threshold of 0.5 are blocked — the agent never downloads their content, and the block is recorded in the final report's Methodology section.
+
+## The Scoring Formula
+
+```python
+def score_source(url: str, snippet: str, question: str) -> float:
+    """
+    Returns a credibility score from 0.0 to 1.0.
+    Final: (domain_score * 0.4) + (relevance_score * 0.5) + recency_score
+    """
+```
+
+The three components and their weights are:
+
+| Component | Weight | What it measures |
+|---|---|---|
+| Domain Authority | 40% | Trustworthiness of the source's domain or TLD |
+| Snippet Relevance | 50% | Word overlap between the snippet and the research question |
+| Recency Signals | 10% | Presence of a publication year or relative time expression |
+
+Because snippet relevance carries the heaviest weight (0.5), the phrasing of your question has a direct influence on which sources pass the threshold.
+
+---
+
+## Component 1: Domain Authority (weight 0.4)
+
+Domain authority is determined by matching the URL against a tiered list of known domains and TLDs. The matching is applied in order: TLD rules are checked first, then exact domain membership in the major-domains list, then social-media domains, and finally everything else falls into the base tier.
+
+### Domain Tiers
+
+| Tier | Score | Domains / TLDs |
+|---|---|---|
+| **Academic / Government** | 0.9 | `*.edu`, `*.gov` |
+| **Major Recognised Sources** | 0.8 | `nature.com`, `science.org`, `wikipedia.org`, `arxiv.org`, `reuters.com`, `apnews.com`, `bloomberg.com`, `nytimes.com`, `wsj.com`, `bbc.com`, `techcrunch.com`, `wired.com`, `github.com`, `medium.com`, `scholar.google.com` |
+| **Non-profit / Organisation** | 0.7 | `*.org` (not already matched above) |
+| **General Web** | 0.4 | All other domains not matched by a higher tier |
+| **Social Media** | 0.3 | `twitter.com`, `x.com`, `facebook.com`, `instagram.com` |
+
+<Note>
+  The `.org` tier (0.7) only applies to domains that did not already match the Major Recognised Sources list. For example, `wikipedia.org` scores 0.8 (major domain), not 0.7 (`.org` TLD).
+</Note>
+
+The domain score feeds into the final formula multiplied by 0.4:
+
+```python
+domain_contribution = domain_score * 0.4
+# .edu domain:       0.9 * 0.4 = 0.36
+# arxiv.org:         0.8 * 0.4 = 0.32
+# *.org:             0.7 * 0.4 = 0.28
+# General site:      0.4 * 0.4 = 0.16
+# Social media:      0.3 * 0.4 = 0.12
+```
+
+---
+
+## Component 2: Snippet Relevance (weight 0.5)
+
+Snippet relevance measures how much vocabulary the search result snippet shares with the research question, after removing common stopwords from both strings.
+
+**Stopwords excluded from matching:**
+
+```
+what, is, are, the, a, an, and, or, but, for, of, in, on, at, to,
+with, by, about, how, why, who, where
+```
+
+The relevance score is computed as:
+
+```python
+question_words = set(question.lower().split()) - STOPWORDS
+snippet_words  = set(snippet.lower().split())  - STOPWORDS
+
+overlap        = question_words & snippet_words
+relevance_score = len(overlap) / len(question_words)  # 0.0 – 1.0
+```
+
+A perfect relevance score of 1.0 means every meaningful word in the question appeared somewhere in the snippet. The relevance score feeds into the formula multiplied by 0.5:
+
+```python
+relevance_contribution = relevance_score * 0.5
+# All question words present:  1.0 * 0.5 = 0.50
+# Half the question words:     0.5 * 0.5 = 0.25
+# No overlap:                  0.0 * 0.5 = 0.00
+```
+
+<Tip>
+  Because snippet relevance is the largest single component (50% of the total score), using specific technical terms in your question increases the chance that topically matched sources pass the credibility threshold. A vague question like "tell me about AI" produces low overlap with any snippet, while "transformer architecture self-attention mechanism" will strongly reward snippets that actually discuss the topic.
+</Tip>
+
+---
+
+## Component 3: Recency Signals (weight 0.1)
+
+The recency component adds a flat bonus of 0.1 to the score if the snippet contains any of these patterns:
+
+| Pattern type | Examples |
+|---|---|
+| Four-digit year starting with `202` | `2024`, `2023`, `2025` |
+| Relative time expressions | `"hours ago"`, `"days ago"`, `"weeks ago"`, `"minutes ago"` |
+
+The check is a simple substring / regex match against the snippet text. If either pattern matches, a recency bonus of `+0.1` is added. If neither matches, the recency contribution is `0.0`.
+
+```python
+recency_score = 0.0
+if re.search(r"202\d", snippet) or re.search(r"\d+ (hours|days|weeks|minutes) ago", snippet):
+    recency_score = 0.1
+```
+
+---
+
+## Complete Score Examples
+
+The formula is: `(domain_score * 0.4) + (relevance_score * 0.5) + recency_score`
+
+```python
+# Example 1 — High-quality academic source, highly relevant, recent
+# URL: https://arxiv.org/abs/2401.00001
+# domain_score = 0.8  (arxiv.org is a major domain)
+# relevance_score = 0.9
+# recency_score = 0.1  (snippet contains "2024")
+score = (0.8 * 0.4) + (0.9 * 0.5) + 0.1
+#      = 0.32 + 0.45 + 0.1
+#      = 0.87  ✅ passes threshold
+
+# Example 2 — General blog, partially relevant, no recency signal
+# URL: https://someblog.com/article
+# domain_score = 0.4  (general web)
+# relevance_score = 0.4
+# recency_score = 0.0
+score = (0.4 * 0.4) + (0.4 * 0.5) + 0.0
+#      = 0.16 + 0.20 + 0.0
+#      = 0.36  🚫 blocked (≤ 0.5)
+
+# Example 3 — Social media post, even if topically relevant
+# URL: https://twitter.com/user/status/123
+# domain_score = 0.3  (social media)
+# relevance_score = 1.0
+# recency_score = 0.1
+score = (0.3 * 0.4) + (1.0 * 0.5) + 0.1
+#      = 0.12 + 0.50 + 0.1
+#      = 0.72  ✅ passes threshold (high relevance compensates for low domain)
+```
+
+---
+
+## Threshold Enforcement
+
+The minimum credibility score is `MIN_CREDIBILITY_SCORE = 0.5`. Enforcement happens inside `fetch_page`, not at search time — the agent always scores and stores metadata for every search result, but only fetches pages that clear the threshold.
+
+```python
+# Inside fetch_page:
+score = score_source(url, snippet, context.question)
+context.source_metadata[url]["score"] = score
+
+if score <= MIN_CREDIBILITY_SCORE:
+    on_progress("block", f"{url} (score: {score:.2f})")
+    return (
+        f"Error: Fetching blocked. Source credibility score ({score:.2f}) "
+        f"is below threshold ({MIN_CREDIBILITY_SCORE})."
+    )
+```
+
+When a source is blocked:
+- A `"block"` progress event fires (displayed as `🚫 Blocked` in the CLI).
+- The error string is returned to the Gemini tool-use loop instead of page content.
+- The URL remains in `context.source_metadata` with its score, so it appears in the final report's **Blocked Sources** count.
+- The blocked fetch does **not** consume a page from `MAX_SOURCES_PER_QUERY`.
+
+## Score Persistence in Reports
+
+Every score computed by `score_source` is stored in `ResearchContext.source_metadata` and is included verbatim in the final report's **Sources** section:
+
+```markdown
+## Sources
+[1]. [Title of Page](https://arxiv.org/abs/...) (Credibility Score: 0.87)
+[2]. [Another Source](https://nature.com/...) (Credibility Score: 0.79)
+```
+
+This means readers can see exactly how much trust the agent placed in each cited source.
